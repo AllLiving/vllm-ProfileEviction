@@ -25,6 +25,23 @@
   #define NEON_DISPATCH(...) case cpu_attention::ISA::NEON:
 #endif  // #ifdef __aarch64__
 
+#ifdef __aarch64__
+  #include "cpu_attn_neon_bfmmla.hpp"
+  #define NEON_BFMMLA_DISPATCH(...)                                       \
+    case cpu_attention::ISA::NEON_BFMMLA: {                               \
+      if constexpr (std::is_same_v<scalar_t, c10::BFloat16>) {            \
+        using attn_impl =                                                 \
+            cpu_attention::AttentionImpl<cpu_attention::ISA::NEON_BFMMLA, \
+                                         scalar_t, head_dim>;             \
+        return __VA_ARGS__();                                             \
+      } else {                                                            \
+        TORCH_CHECK(false, "NEON_BFMMLA only supports bfloat16 inputs."); \
+      }                                                                   \
+    }
+#else
+  #define NEON_BFMMLA_DISPATCH(...) case cpu_attention::ISA::NEON_BFMMLA:
+#endif  // #ifdef __aarch64__
+
 #define CPU_ATTN_DISPATCH_CASE(HEAD_DIM, ...) \
   case HEAD_DIM: {                            \
     constexpr size_t head_dim = HEAD_DIM;     \
@@ -54,6 +71,7 @@
     switch (ISA_TYPE) {                                                       \
       AMX_DISPATCH(__VA_ARGS__)                                               \
       NEON_DISPATCH(__VA_ARGS__)                                              \
+      NEON_BFMMLA_DISPATCH(__VA_ARGS__)                                       \
       case cpu_attention::ISA::VEC: {                                         \
         using attn_impl =                                                     \
             cpu_attention::AttentionImpl<cpu_attention::ISA::VEC, scalar_t,   \
@@ -88,6 +106,8 @@ torch::Tensor get_scheduler_metadata(
     isa = cpu_attention::ISA::VEC16;
   } else if (isa_hint == "neon") {
     isa = cpu_attention::ISA::NEON;
+  } else if (isa_hint == "neon_bfmmla") {
+    isa = cpu_attention::ISA::NEON_BFMMLA;
   } else {
     TORCH_CHECK(false, "Unsupported CPU attention ISA hint: " + isa_hint);
   }
@@ -174,6 +194,8 @@ void cpu_attn_reshape_and_cache(
       return cpu_attention::ISA::VEC16;
     } else if (isa == "neon") {
       return cpu_attention::ISA::NEON;
+    } else if (isa == "neon_bfmmla") {
+      return cpu_attention::ISA::NEON_BFMMLA;
     } else {
       TORCH_CHECK(false, "Invalid ISA type: " + isa);
     }
@@ -183,10 +205,19 @@ void cpu_attn_reshape_and_cache(
       key.scalar_type(), "cpu_attn_reshape_and_cache", [&]() {
         CPU_ATTN_DISPATCH_CASE_HEADDIM(head_dim, [&] {
           CPU_ATTN_DISPATCH_IMPL(isa_tag, [&]() {
+            // Use kv_cache_t defined by the backend (NEON BFMMLA uses BF16
+            // caches)
+            using cache_t = typename attn_impl::kv_cache_t;
+            using cache_scalar_torch =
+                std::conditional_t<std::is_same_v<cache_t, c10::BFloat16>,
+                                   at::BFloat16, scalar_t>;
+
             attn_impl::reshape_and_cache(
                 key.data_ptr<scalar_t>(), value.data_ptr<scalar_t>(),
-                key_cache.data_ptr<scalar_t>(),
-                value_cache.data_ptr<scalar_t>(),
+                reinterpret_cast<cache_t*>(
+                    key_cache.data_ptr<cache_scalar_torch>()),
+                reinterpret_cast<cache_t*>(
+                    value_cache.data_ptr<cache_scalar_torch>()),
                 slot_mapping.data_ptr<int64_t>(), token_num,
                 key_token_num_stride, value_token_num_stride, head_num,
                 key_head_num_stride, value_head_num_stride, num_blocks,

@@ -486,10 +486,13 @@ def _make_sliding_window_bias(
 
 def _get_attn_isa(dtype: torch.dtype, block_size: int) -> str:
     supports_amx = torch._C._cpu._is_amx_tile_supported()
+    supports_arm = current_platform.get_cpu_architecture() == CpuArchEnum.ARM
     if supports_amx and dtype in (torch.bfloat16,) and block_size % 32 == 0:
         return "amx"
+    elif supports_arm and block_size % 128 == 0 and dtype == torch.bfloat16:
+        return "neon_bfmmla"
     elif block_size % 32 == 0:
-        if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
+        if supports_arm:
             return "neon"
         else:
             return "vec"
