@@ -5,7 +5,10 @@
 Run `pytest tests/quantization/test_fp8.py --forked`.
 """
 
+import logging
+
 import pytest
+import regex as re
 import torch
 
 from tests.quantization.utils import is_quant_method_supported
@@ -190,6 +193,63 @@ def test_load_fp16_model(
                 )
 
         llm.apply_model(check_model)
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("fp8"),
+    reason="FP8 is not supported on this GPU type.",
+)
+def test_online_quant_peak_mem(
+    vllm_runner,
+    monkeypatch,
+    caplog,
+) -> None:
+    # Disable multiprocessing so logs are captured in the main process
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+    # Enable propagation so caplog can capture vllm logs
+    vllm_logger = logging.getLogger("vllm")
+    original_propagate = vllm_logger.propagate
+    vllm_logger.propagate = True
+
+    try:
+        with vllm_runner(
+            "Qwen/Qwen1.5-MoE-A2.7B",
+            quantization="fp8",
+            enforce_eager=True,
+        ) as _llm:
+            pass
+    finally:
+        vllm_logger.propagate = original_propagate
+
+    # Parse memory usage from captured logs
+    model_memory_gib = None
+    peak_memory_gib = None
+    for record in caplog.records:
+        if model_memory_gib is None:
+            match = re.search(r"Model loading took ([\d.]+) GiB memory", record.message)
+            if match:
+                model_memory_gib = float(match.group(1))
+        if peak_memory_gib is None:
+            match = re.search(
+                r"Peak GPU memory after loading weights: ([\d.]+) GiB", record.message
+            )
+            if match:
+                peak_memory_gib = float(match.group(1))
+
+    assert model_memory_gib is not None, "Could not find model loading memory log"
+    assert peak_memory_gib is not None, "Could not find peak memory log"
+    print(f"Model loading memory: {model_memory_gib} GiB")
+    print(f"Peak GPU memory after loading weights: {peak_memory_gib} GiB")
+
+    # model specific, Qwen/Qwen1.5-MoE-A2.7B fp8 online quant uses ~13.94
+    # GiB for weight loading (bf16 checkpoint is ~28 GiB)
+    assert model_memory_gib < 14.0, f"{model_memory_gib=} too high"
+    # for Qwen/Qwen1.5-MoE-A2.7B the number we see today is 14.98 GiB, which
+    # is 1.07x above model_memory_gib. A slightly higher number is expected as
+    # when we load and quantize weights in a streaming fashion we need to
+    # have individual weights in bf16 + fp8 alive at the same time.
+    assert peak_memory_gib < 1.08 * model_memory_gib, f"{peak_memory_gib=} too high"
 
 
 @pytest.mark.skipif(
