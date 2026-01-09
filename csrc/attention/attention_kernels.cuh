@@ -17,10 +17,8 @@
  * limitations under the License.
  */
 
-#include <torch/all.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
 #include <algorithm>
+#include <cfloat>
 
 #include "attention_dtypes.h"
 #include "attention_utils.cuh"

@@ -282,10 +282,6 @@ endif()
 set(VLLM_EXT_SRC
   "csrc/mamba/mamba_ssm/selective_scan_fwd.cu"
   "csrc/cache_kernels.cu"
-  "csrc/attention/paged_attention_v1.cu"
-  "csrc/attention/paged_attention_v2.cu"
-  "csrc/attention/merge_attn_states.cu"
-  "csrc/attention/vertical_slash_index.cu"
   "csrc/quantization/gptq/q_gemm.cu"
   "csrc/quantization/gguf/gguf_kernel.cu"
   "csrc/cuda_utils_kernels.cu"
@@ -943,6 +939,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/quantization/activation_kernels.cu"
     "csrc/quantization/w8a8/int8/scaled_quant.cu"
     "csrc/quantization/w8a8/fp8/common.cu"
+    "csrc/attention/paged_attention_v1.cu"
+    "csrc/attention/paged_attention_v2.cu"
+    "csrc/attention/merge_attn_states.cu"
+    "csrc/attention/vertical_slash_index.cu"
     "csrc/torch_bindings_stable.cpp")
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
