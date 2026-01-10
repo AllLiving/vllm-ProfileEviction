@@ -52,6 +52,7 @@ logger = init_logger(__name__)
 
 
 # TODO(bnell): check why this needs to be a CustomOp, get rid of it?
+# https://github.com/vllm-project/vllm/pull/6289
 # --8<-- [start:unquantized_fused_moe]
 @CustomOp.register("unquantized_fused_moe")
 class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
