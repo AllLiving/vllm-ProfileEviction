@@ -40,7 +40,7 @@ def server():
 
 
 @pytest.mark.parametrize("stream_interval", [1, 8, 9, 10, 18, 19, 20])
-def test_streaming_tool_calls_with_different_intervals(server, stream_interval: int):
+def test_streaming_tool_calls_with_different_intervals(stream_interval: int):
     """
     Test that streaming tool calls work correctly with different stream intervals.
 
