@@ -9,7 +9,6 @@ import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
-from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEConfig,
@@ -53,12 +52,8 @@ logger = init_logger(__name__)
 
 # TODO(bnell): check why this needs to be a CustomOp, get rid of it?
 # https://github.com/vllm-project/vllm/pull/6289
-# --8<-- [start:unquantized_fused_moe]
-@CustomOp.register("unquantized_fused_moe")
-class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
+class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
     """MoE method without quantization."""
-
-    # --8<-- [end:unquantized_fused_moe]
 
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
@@ -215,7 +210,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             import intel_extension_for_pytorch as ipex
 
             ep_rank_start = self.moe.ep_rank * self.moe.num_local_experts
-            layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
+            self.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
                 layer.w13_weight,
                 layer.w2_weight,
                 use_prepack=True,
@@ -247,11 +242,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                     )
                     assert packed_w2_weight.size() == layer.w2_weight.size()
                     layer.w2_weight.copy_(packed_w2_weight)
-                    layer.cpu_fused_moe = cpu_fused_moe.SGLFusedMOE(layer)
+                    self.cpu_fused_moe = cpu_fused_moe.SGLFusedMOE(layer)
                 else:
-                    layer.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
+                    self.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
             else:
-                layer.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
+                self.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
         elif current_platform.is_cuda_alike():
             self.moe_quant_config = self.get_fused_moe_quant_config(layer)
             if self.rocm_aiter_moe_enabled:
@@ -300,19 +295,16 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        return self.forward(layer, x, topk_weights, topk_ids)
+        raise ValueError("apply not set")
 
+    # Does this need to exist?
     def apply_monolithic(
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        return self.forward(
-            layer=layer,
-            x=x,
-            router_logits=router_logits,
-        )
+        raise ValueError("apply_monolithic not set")
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
         if self.moe.has_bias:
@@ -323,18 +315,18 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         else:
             return FUSED_MOE_UNQUANTIZED_CONFIG
 
-    def forward_cuda(
+    def apply_cuda(
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
-        router_logits_or_topk_weights: torch.Tensor,
+        topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         return self.kernel(
             hidden_states=x,
             w1=layer.w13_weight,
             w2=layer.w2_weight,
-            topk_weights=router_logits_or_topk_weights,
+            topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=self.use_inplace,
             activation=layer.activation,
@@ -343,27 +335,18 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             expert_map=layer.expert_map,
         )
 
-    def forward_cpu(
+    def apply_monolithic_cpu(
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
-        router_logits_or_topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
+        router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if (
-            layer.enable_eplb is not False
-            or layer.eplb_state.expert_load_view is not None
-            or layer.eplb_state.logical_to_physical_map is not None
-            or layer.eplb_state.logical_replica_count is not None
-        ):
-            raise NotImplementedError("Expert load balancing is not supported for CPU.")
-
-        return layer.cpu_fused_moe(
+        return self.cpu_fused_moe(
             layer,
             x,
             layer.use_grouped_topk,
             layer.top_k,
-            router_logits_or_topk_weights,
+            router_logits,
             layer.renormalize,
             layer.topk_group,
             layer.num_expert_group,
@@ -377,25 +360,17 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             layer.activation,
         )
 
-    def forward_xpu(
+    def apply_monolithic_xpu(
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
-        router_logits_or_topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
+        router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if (
-            layer.enable_eplb is not False
-            or layer.eplb_state.expert_load_view is not None
-            or layer.eplb_state.logical_to_physical_map is not None
-            or layer.eplb_state.logical_replica_count is not None
-        ):
-            raise NotImplementedError("Expert load balancing is not supported for XPU.")
-        return layer.ipex_fusion(
+        return self.ipex_fusion(
             x,
             layer.use_grouped_topk,
             layer.top_k,
-            router_logits_or_topk_weights,
+            router_logits,
             layer.renormalize,
             layer.topk_group,
             layer.num_expert_group,
@@ -403,8 +378,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         )
 
     if current_platform.is_cpu():
-        forward_native = forward_cpu
+        apply_monolithic = apply_monolithic_cpu
     elif current_platform.is_xpu():
-        forward_native = forward_xpu
+        apply_monolithic = apply_monolithic_xpu
     else:
-        forward_native = forward_cuda
+        apply = apply_cuda
