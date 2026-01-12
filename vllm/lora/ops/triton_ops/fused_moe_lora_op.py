@@ -153,14 +153,13 @@ def _fused_moe_lora_kernel(
     token_mask = offs_token < num_valid_tokens
 
     if USE_TMA and not sorted_c:
-        # during expand execution with TMA enabled, we
-        # load from A using TMA
-        tl.static_assert(a_desc is not None, "a_desc should should not be none")
+        # Shrink path - with TMA enabled, we load from A using TMA
+        tl.static_assert(a_desc is not None, "a_desc should not be none")
         offs_am = slice_id * EM + pid_m * BLOCK_SIZE_M // top_k
         offs_ak = pid_sk * BLOCK_SIZE_K
     else:
         # Shrink path - load hidden states based on order defined in
-        # 'sorted_token_ids_ptr' then store them in c_ptr in this same shuffled order
+        # 'sorted_token_ids_ptr' then store them in c_ptr in this same sorted order
         tl.static_assert(a_desc is None, "a_desc must be none")
         cur_a_ptr = a_ptr + (slice_id % num_slice_a) * slice_a_size
         a_ptrs = cur_a_ptr + (
@@ -543,14 +542,17 @@ def _fused_moe_lora(
     num_tokens = M * top_k_num
     w1_output_dim_size = w1_lora_b_stacked.shape[2]
 
-    use_tma = supports_tma(device)
+    # TMA is not currently compatiple with fully_sharded due to the non-determinism
+    # of token id sorting across ranks.
+    use_tma = supports_tma(device) and not fully_sharded
+
     if use_tma and num_slices > 1:
         # if num_slices > 1, we construct TMA descriptors for
         # LoRA weights within the kernel, which requires us to first set an allocator
         _set_triton_allocator(device)
 
     a_intermediate_cache1 = torch.zeros(
-        (num_slices, sorted_token_ids.shape[-1] // top_k_num, top_k_num, max_lora_rank),
+        (num_slices, EM // top_k_num, top_k_num, max_lora_rank),
         dtype=output.dtype,
         device=device,
     )
