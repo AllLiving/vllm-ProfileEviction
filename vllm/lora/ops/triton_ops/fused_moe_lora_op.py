@@ -10,7 +10,7 @@ from vllm.distributed import (
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from .utils import supports_pdl
+from .utils import supports_pdl, supports_tma
 
 _LORA_PTR_DICT: dict[tuple[int, ...], torch.tensor] = {}
 
@@ -36,6 +36,13 @@ def _get_ptr(lora_weights: list[torch.Tensor], device: torch.device):
     return _LORA_PTR_DICT.get(key)
 
 
+def _set_triton_allocator(device: torch.device):
+    def alloc_fn(size: int, alignment: int, stream: int | None):
+        return torch.empty(size, device=device, dtype=torch.int8)
+
+    triton.set_allocator(alloc_fn)
+
+
 @triton.jit(
     do_not_specialize=[
         "num_valid_tokens",
@@ -48,7 +55,9 @@ def _get_ptr(lora_weights: list[torch.Tensor], device: torch.device):
 )
 def _fused_moe_lora_kernel(
     a_ptr,
+    a_desc,
     b_ptr,
+    b_desc,
     c_ptr,
     topk_weights_ptr,
     sorted_token_ids_ptr,
@@ -91,6 +100,8 @@ def _fused_moe_lora_kernel(
     USE_GDC: tl.constexpr,
     launch_pdl: tl.constexpr,
     IS_PRIMARY: tl.constexpr,
+    USE_TMA: tl.constexpr,
+    sorted_c: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
     slice_id = tl.program_id(axis=1)
@@ -128,33 +139,59 @@ def _fused_moe_lora_kernel(
     expert_id = tl.load(expert_ids_ptr + ind, ind < max_loras * stride_el, -1)
     if expert_id == -1:
         return
-    # get a_ptr,b_ptr,c_ptr
-    cur_a_ptr = a_ptr + (slice_id % num_slice_a) * slice_a_size
-    cur_b_ptr = tl.load(b_ptr + slice_id).to(tl.pointer_type(c_ptr.dtype.element_ty))
+
     cur_c_ptr = c_ptr + (slice_id % num_slice_c) * slice_c_size
 
-    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)) % N
     offs_k = pid_sk * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
-
     offs_token_id = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M).to(tl.int64)
     token_ind = stride_tl * lora_id + offs_token_id
     offs_token = tl.load(
-        sorted_token_ids_ptr + token_ind, token_ind < max_loras * stride_tl, 0
+        sorted_token_ids_ptr + token_ind,
+        token_ind < max_loras * stride_tl,
+        num_valid_tokens,
     )
     token_mask = offs_token < num_valid_tokens
 
-    # get a_ptrs,b_ptrs
-    a_ptrs = cur_a_ptr + (
-        offs_token[:, None] // top_k * stride_am + offs_k[None, :] * stride_ak
-    )
+    if USE_TMA and not sorted_c:
+        # during expand execution with TMA enabled, we
+        # load from A using TMA
+        tl.static_assert(a_desc is not None, "a_desc should should not be none")
+        offs_am = slice_id * EM + pid_m * BLOCK_SIZE_M // top_k
+        offs_ak = pid_sk * BLOCK_SIZE_K
+    else:
+        # Shrink path - load hidden states based on order defined in
+        # 'sorted_token_ids_ptr' then store them in c_ptr in this same shuffled order
+        tl.static_assert(a_desc is None, "a_desc must be none")
+        cur_a_ptr = a_ptr + (slice_id % num_slice_a) * slice_a_size
+        a_ptrs = cur_a_ptr + (
+            offs_token[:, None] // top_k * stride_am + offs_k[None, :] * stride_ak
+        )
 
-    b_ptrs = (
-        cur_b_ptr
-        + lora_id * stride_bl
-        + expert_id * stride_be
-        + offs_k[:, None] * stride_bk
-        + offs_bn[None, :] * stride_bn
-    )
+    if USE_TMA:
+        offs_bn = pid_n * BLOCK_SIZE_N
+        offs_bk = pid_sk * BLOCK_SIZE_K
+        if b_desc is None:
+            cur_b_ptr = tl.load(b_ptr + slice_id).to(
+                tl.pointer_type(c_ptr.dtype.element_ty)
+            )
+            b_desc = tl.make_tensor_descriptor(
+                cur_b_ptr,
+                shape=[max_loras, num_experts, N, K],
+                strides=[stride_bl, stride_be, stride_bn, stride_bk],
+                block_shape=[1, 1, BLOCK_SIZE_N, BLOCK_SIZE_K],
+            )
+    else:
+        cur_b_ptr = tl.load(b_ptr + slice_id).to(
+            tl.pointer_type(c_ptr.dtype.element_ty)
+        )
+        offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)) % N
+        b_ptrs = (
+            cur_b_ptr
+            + lora_id * stride_bl
+            + expert_id * stride_be
+            + offs_k[:, None] * stride_bk
+            + offs_bn[None, :] * stride_bn
+        )
 
     if USE_GDC and IS_PRIMARY:
         # GDC launch dependents hints the runtime system to launch dependent kernels.
@@ -167,22 +204,30 @@ def _fused_moe_lora_kernel(
         tl.extra.cuda.gdc_wait()
 
     for k in range(0, grid_k):
-        k_remaining = K - k * (BLOCK_SIZE_K * SPLIT_K)
-        # GDC wait waits for ALL programs in the prior kernel to complete
-        # before continuing.
+        cur_k_offset = k * (BLOCK_SIZE_K * SPLIT_K)
+        k_remaining = K - cur_k_offset
         # pre-fetch lora weight
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < k_remaining, other=0.0)
-        if USE_GDC and not IS_PRIMARY:
-            tl.extra.cuda.gdc_wait()
-        a = tl.load(
-            a_ptrs,
-            mask=token_mask[:, None] & (offs_k[None, :] < k_remaining),
-            other=0.0,
-        )
+        if b_desc is not None:
+            b = (
+                b_desc.load([lora_id, expert_id, offs_bn, offs_bk + cur_k_offset])
+                .reshape(BLOCK_SIZE_N, BLOCK_SIZE_K)
+                .T
+            )
+        else:
+            b = tl.load(b_ptrs, mask=offs_k[:, None] < k_remaining, other=0.0)
+            b_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_bk
+
+        if a_desc is not None:
+            a = a_desc.load([offs_am, offs_ak + cur_k_offset])
+        else:
+            a = tl.load(
+                a_ptrs,
+                mask=token_mask[:, None] & (offs_k[None, :] < k_remaining),
+                other=0.0,
+            )
+            a_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_ak
+
         accumulator += tl.dot(a, b)
-        # Advance the ptrs to the next K block.
-        a_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_ak
-        b_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_bk
 
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0)
@@ -190,7 +235,17 @@ def _fused_moe_lora_kernel(
     accumulator = accumulator.to(c_ptr.dtype.element_ty)
     # Write back the block of the output
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    c_ptrs = cur_c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
+
+    if sorted_c:
+        c_ptrs = (
+            cur_c_ptr
+            + stride_cm * offs_token_id[:, None]
+            + stride_cn * offs_cn[None, :]
+        )
+    else:
+        c_ptrs = (
+            cur_c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
+        )
     c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
 
     if SPLIT_K == 1:
@@ -232,6 +287,7 @@ def _fused_moe_lora_shrink(
     split_k: int,
     mul_routed_weight: bool = False,
     use_gdc: bool = False,
+    use_tma: bool = False,
 ) -> None:
     w1_lora_a_stacked = lora_a_stacked[0]
     shrink_config = {
@@ -244,6 +300,7 @@ def _fused_moe_lora_shrink(
         "SPLIT_K": split_k,
         "USE_GDC": use_gdc,
         "launch_pdl": use_gdc,  # triton kernel metadata
+        "USE_TMA": use_tma,
     }
 
     b_ptr = _get_ptr(lora_a_stacked, device)
@@ -255,9 +312,19 @@ def _fused_moe_lora_shrink(
         len(lora_a_stacked),
         lora_a_stacked[0].shape[0],
     )
+
+    a_desc = b_desc = None
+    if use_tma and num_slices == 1:
+        b_desc = triton.tools.tensor_descriptor.TensorDescriptor.from_tensor(
+            lora_a_stacked[0],
+            [1, 1, shrink_config["BLOCK_SIZE_N"], shrink_config["BLOCK_SIZE_K"]],
+        )
+
     _fused_moe_lora_kernel[grid](
         qcurr_hidden_states,
+        a_desc,
         b_ptr,
+        b_desc,
         a_intermediate_cache1,
         topk_weights,
         sorted_token_ids,
@@ -286,6 +353,7 @@ def _fused_moe_lora_shrink(
         num_slice_c=num_slices,
         top_k=1 if mul_routed_weight else top_k_num,
         MUL_ROUTED_WEIGHT=False,
+        sorted_c=use_tma,
         IS_PRIMARY=True,
         **shrink_config,
     )
@@ -327,6 +395,7 @@ def _fused_moe_lora_expand(
     mul_routed_weight: bool = False,
     offset: int = 0,
     use_gdc: bool = False,
+    use_tma: bool = False,
 ) -> None:
     b_ptr = _get_ptr(lora_b_stacked, device)
     K = max_lora_rank
@@ -348,6 +417,7 @@ def _fused_moe_lora_expand(
         "SPLIT_K": split_k,  # Set split_k = 1 for expand calls
         "USE_GDC": use_gdc,
         "launch_pdl": use_gdc,  # triton kernel metadata
+        "USE_TMA": use_tma,
     }
 
     grid = lambda META: (
@@ -355,9 +425,26 @@ def _fused_moe_lora_expand(
         len(lora_b_stacked),
         lora_b_stacked[0].shape[0],
     )
+
+    a_desc = b_desc = None
+    if use_tma:
+        a_desc = triton.tools.tensor_descriptor.TensorDescriptor.from_tensor(
+            a_intermediate_cache1,
+            [expand_config["BLOCK_SIZE_M"], expand_config["BLOCK_SIZE_K"]],
+        )
+        if num_slices == 1:
+            b_desc = triton.tools.tensor_descriptor.TensorDescriptor.from_tensor(
+                lora_b_stacked[0],
+                [1, 1, expand_config["BLOCK_SIZE_N"], expand_config["BLOCK_SIZE_K"]],
+            )
+    else:
+        b_desc = None
+
     _fused_moe_lora_kernel[grid](
         a_intermediate_cache1,
+        a_desc,
         b_ptr,
+        b_desc,
         b_intermediate_cache1,
         topk_weights,
         sorted_token_ids,
@@ -386,6 +473,7 @@ def _fused_moe_lora_expand(
         num_slice_c=num_slices,
         top_k=1,
         MUL_ROUTED_WEIGHT=mul_routed_weight,
+        sorted_c=False,
         IS_PRIMARY=False,
         **expand_config,
     )
@@ -455,8 +543,14 @@ def _fused_moe_lora(
     num_tokens = M * top_k_num
     w1_output_dim_size = w1_lora_b_stacked.shape[2]
 
+    use_tma = supports_tma(device)
+    if use_tma and num_slices > 1:
+        # if num_slices > 1, we construct TMA descriptors for
+        # LoRA weights within the kernel, which requires us to first set an allocator
+        _set_triton_allocator(device)
+
     a_intermediate_cache1 = torch.zeros(
-        (num_slices, M, top_k_num, max_lora_rank),
+        (num_slices, sorted_token_ids.shape[-1] // top_k_num, top_k_num, max_lora_rank),
         dtype=output.dtype,
         device=device,
     )
@@ -496,6 +590,7 @@ def _fused_moe_lora(
         shrink_split_k,
         mul_routed_weight,
         use_gdc=use_gdc,
+        use_tma=use_tma,
     )
 
     if fully_sharded:
@@ -544,6 +639,7 @@ def _fused_moe_lora(
         mul_routed_weight,
         offset,
         use_gdc=use_gdc,
+        use_tma=use_tma,
     )
 
 
