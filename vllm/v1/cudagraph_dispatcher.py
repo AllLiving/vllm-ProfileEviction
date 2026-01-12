@@ -57,7 +57,12 @@ class CudagraphDispatcher:
         )
 
         self.keys_initialized = False
-        self.specialize_lora_count = self.vllm_config.lora_config.specialize_active_lora
+        self.specialize_lora_count = (
+            self.vllm_config.lora_config.specialize_active_lora
+            if self.vllm_config.lora_config
+            else False
+        )
+        self.captured_lora_counts: list[int] = []
 
     def _get_lora_cases(self) -> list[tuple[bool, int]]:
         """
@@ -78,6 +83,8 @@ class CudagraphDispatcher:
                 # if n is power of 2 or n == lora_config.max_loras, adding it to cases
                 if (n & (n - 1)) == 0 or n == lora_config.max_loras:
                     cases.append((True, n))
+        else:
+            cases.append((True, lora_config.max_loras))
 
         return cases
 
@@ -127,6 +134,9 @@ class CudagraphDispatcher:
 
         # Get LoRA cases to capture
         lora_cases = self._get_lora_cases()
+        self.captured_lora_counts = sorted(
+            [num_loras for has_lora, num_loras in lora_cases if has_lora]
+        )
 
         # Note: we create all valid keys for cudagraph here but do not
         # guarantee all keys would be used. For example, if we allow lazy
@@ -198,6 +208,15 @@ class CudagraphDispatcher:
             return CUDAGraphMode.NONE, BatchDescriptor(num_tokens)
 
         effective_num_active_loras = num_active_loras
+        if self.specialize_lora_count and has_lora and num_active_loras > 0:
+            # Find the smallest captured `num_active_loras` that is >= the current
+            # `num_active_loras`. This is because we only capture graphs for
+            # a subset of possible `num_active_loras` values (powers of 2).
+            import bisect
+
+            idx = bisect.bisect_left(self.captured_lora_counts, num_active_loras)
+            if idx < len(self.captured_lora_counts):
+                effective_num_active_loras = self.captured_lora_counts[idx]
 
         batch_desc = self._create_padded_batch_descriptor(
             num_tokens, uniform_decode, has_lora, effective_num_active_loras
