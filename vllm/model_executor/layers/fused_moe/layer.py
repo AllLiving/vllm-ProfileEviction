@@ -1683,7 +1683,7 @@ class FusedMoE(CustomOp):
                     router_logits=staged_router_logits,
                 )
 
-                if self.capture:
+                if self.capture is not None:
                     self.capture(topk_ids)
 
                 final_hidden_states = self.quant_method.apply(
@@ -1876,7 +1876,7 @@ class FusedMoE(CustomOp):
                     router_logits=router_logits,
                 )
 
-                if self.capture:
+                if self.capture is not None:
                     self.capture(topk_ids)
 
                 final_hidden_states = self.quant_method.apply(
