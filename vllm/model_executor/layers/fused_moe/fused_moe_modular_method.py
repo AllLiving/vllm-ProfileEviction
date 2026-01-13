@@ -5,7 +5,6 @@
 import torch
 
 from vllm.logger import init_logger
-from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
@@ -20,11 +19,7 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
 logger = init_logger(__name__)
 
 
-# --8<-- [start:modular_fused_moe]
-@CustomOp.register("modular_fused_moe")
-class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
-    # --8<-- [end:modular_fused_moe]
-
+class FusedMoEModularMethod(FusedMoEMethodBase):
     def __init__(
         self, old_quant_method: FusedMoEMethodBase, experts: FusedMoEModularKernel
     ):
