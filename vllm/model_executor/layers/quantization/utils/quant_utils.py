@@ -227,7 +227,7 @@ def scaled_quantize(
     amax = torch.maximum(min_val.abs(), max_val.abs()).clamp(min=1e-12)
     scale = finfo.max / amax
 
-    # Apply scale and convert form:
+    # Apply scale and convert from:
     # (BLK_M, BLK_N, BLOCK_SIZE_M * BLOCK_SIZE_N) to (M, N)
     x_scl_sat = (
         (x_blkd_permd * scale.unsqueeze(-1))
