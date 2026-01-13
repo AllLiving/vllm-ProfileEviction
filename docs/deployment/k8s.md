@@ -81,7 +81,7 @@ Next, start the vLLM server as a Kubernetes Deployment and Service:
         spec:
           containers:
           - name: vllm
-            image: vllm/vllm-openai:latest
+            image: public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:latest
             command: ["/bin/sh", "-c"]
             args: [
               "vllm serve meta-llama/Llama-3.2-1B-Instruct"
