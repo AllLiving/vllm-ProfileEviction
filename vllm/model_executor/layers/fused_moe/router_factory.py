@@ -6,7 +6,6 @@ import torch
 
 import vllm.envs as envs
 from vllm.distributed.eplb.eplb_state import EplbLayerState
-from vllm.model_executor.layers.fused_moe.base_router import BaseRouter
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.custom_routing_router import (
     CustomRoutingRouter,
@@ -85,7 +84,6 @@ def create_fused_moe_router(
     Returns:
         An instance of the appropriate FusedMoERouter subclass
     """
-    router: BaseRouter
 
     routing_strategy = envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY
     if routing_strategy != "":

@@ -633,7 +633,9 @@ class FusedMoE(CustomOp):
             # In dummy runs, the capturer is not initialized.
             capturer = RoutedExpertsCapturer.get_instance()
             if capturer is not None:
-                self.capture = lambda topk_ids: capturer.capture(self.layer_id, topk_ids)
+                self.capture = lambda topk_ids: capturer.capture(
+                    self.layer_id, topk_ids
+                )
 
         self.router = create_fused_moe_router(
             top_k=top_k,
@@ -651,7 +653,6 @@ class FusedMoE(CustomOp):
             enable_eplb=enable_eplb,
             indices_type_getter=lambda: self.quant_method.topk_indices_dtype,
             routing_method_type=routing_method_type,
-            capture=capture,
         )
 
     # Note: maybe_init_modular_kernel should only be called by
