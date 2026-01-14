@@ -23,7 +23,9 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
 from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
 from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.renderers.hf import HfRenderer
 from vllm.tokenizers import get_tokenizer
+from vllm.tokenizers.registry import tokenizer_args_from_config
 from vllm.tool_parsers import ToolParserManager
 from vllm.v1.engine.async_llm import AsyncLLM
 
@@ -453,6 +455,15 @@ class MockModelConfig:
         return self.diff_sampling_param or {}
 
 
+def _build_renderer(model_config: MockModelConfig):
+    _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
+
+    return HfRenderer(
+        model_config,
+        tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
+    )
+
+
 def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
     models = OpenAIServingModels(
         engine_client=engine,
@@ -488,6 +499,7 @@ class MockEngine:
     model_config: MockModelConfig = field(default_factory=MockModelConfig)
     input_processor: MagicMock = field(default_factory=MagicMock)
     io_processor: MagicMock = field(default_factory=MagicMock)
+    renderer: MagicMock = field(default_factory=MagicMock)
 
 
 async def _async_serving_chat_init():
@@ -513,11 +525,11 @@ def test_async_serving_chat_init():
 @pytest.mark.asyncio
 async def test_serving_chat_returns_correct_model_name():
     mock_engine = MagicMock(spec=AsyncLLM)
-    mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     serving_chat = _build_serving_chat(mock_engine)
     messages = [{"role": "user", "content": "what is 1+1?"}]
@@ -543,11 +555,11 @@ async def test_serving_chat_returns_correct_model_name():
 @pytest.mark.asyncio
 async def test_serving_chat_should_set_correct_max_tokens():
     mock_engine = MagicMock(spec=AsyncLLM)
-    mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     serving_chat = _build_serving_chat(mock_engine)
 
@@ -576,11 +588,11 @@ async def test_serving_chat_should_set_correct_max_tokens():
 
     # Reinitialize the engine with new settings
     mock_engine = MagicMock(spec=AsyncLLM)
-    mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
     mock_engine.model_config = mock_model_config
     mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     # Initialize the serving chat
     serving_chat = _build_serving_chat(mock_engine)
@@ -621,11 +633,11 @@ async def test_serving_chat_should_set_correct_max_tokens():
 
     # Reinitialize the engine with new settings
     mock_engine = MagicMock(spec=AsyncLLM)
-    mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
     mock_engine.model_config = mock_model_config
     mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     # Initialize the serving chat
     serving_chat = _build_serving_chat(mock_engine)
@@ -667,11 +679,11 @@ async def test_serving_chat_could_load_correct_generation_config():
     }
 
     mock_engine = MagicMock(spec=AsyncLLM)
-    mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
     mock_engine.model_config = mock_model_config
     mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     # Initialize the serving chat
     serving_chat = _build_serving_chat(mock_engine)
@@ -713,11 +725,11 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
     mock_model_config.hf_config.model_type = model_type
 
     mock_engine = MagicMock(spec=AsyncLLM)
-    mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
     mock_engine.model_config = mock_model_config
     mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     serving_chat = _build_serving_chat(mock_engine)
 
@@ -746,11 +758,11 @@ async def test_serving_chat_data_parallel_rank_extraction():
     """Test that data_parallel_rank is properly extracted from header and
     passed to engine."""
     mock_engine = MagicMock(spec=AsyncLLM)
-    mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     # Mock the generate method to return an async generator
     async def mock_generate(*args, **kwargs):
