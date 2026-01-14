@@ -27,7 +27,7 @@ def pplx_hidden_dim_scale_bytes(
     quant_dtype: torch.dtype | str | None,
     per_act_token_quant: bool,
     block_shape: list[int] | None,
-):
+) -> tuple[int, int]:
     # All pplx byte sizes must be 16-byte aligned.
     align = 16
 
