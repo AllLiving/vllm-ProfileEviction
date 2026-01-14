@@ -117,13 +117,13 @@ class NanoNemotronVLImagePixelInputsDynamic(TensorSchema):
     """
     Dynamic-resolution image inputs.
 
-    pixel_values_flat: patchified tokens (built in-model from per-image tensors).
     imgs_sizes: per-image (height, width) in pixels.
     num_tokens_per_image: per-image number of embedding tokens (post downsample).
     """
 
     type: Literal["pixel_values_dynamic"] = "pixel_values_dynamic"
-    pixel_values_flat: torch.Tensor
+    pixel_values_flat: Annotated[torch.Tensor, TensorShape(1, "h", "w")]
+    """Dynamic resolution stacks images, hence `dim_0=1`"""
     imgs_sizes: list[tuple[int, int]]
     num_tokens_per_image: Annotated[torch.Tensor, TensorShape("bn")]
 
@@ -1646,7 +1646,6 @@ class NemotronH_Nano_VL_V2(
                 pixel_values_flat=pixel_values_flat,
                 imgs_sizes=imgs_sizes,
                 num_tokens_per_image=num_tokens_per_image,
-                validate=False,  # TODO(nhaber)
             )
         else:
             image_num_patches = kwargs["image_num_patches"]
