@@ -2901,7 +2901,6 @@ class GPUModelRunner(
         positions: torch.Tensor | None = None,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-        force_eager: bool = False,
         **model_kwargs: dict[str, Any],
     ) -> Any:
         """Helper method to call the model forward pass.
@@ -2920,17 +2919,6 @@ class GPUModelRunner(
         Returns:
             Model output tensor
         """
-
-        if force_eager:
-            # Run un-compiled forward pass.
-            return self.model.forward(
-                input_ids=input_ids,
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                inputs_embeds=inputs_embeds,
-                **model_kwargs,
-            )
-
         return self.model(
             input_ids=input_ids,
             positions=positions,
@@ -3303,6 +3291,7 @@ class GPUModelRunner(
                 cudagraph_runtime_mode=cudagraph_mode,
                 batch_descriptor=batch_desc,
                 ubatch_slices=ubatch_slices_padded,
+                skip_compiled=has_encoder_input,
             ),
             record_function_or_nullcontext("gpu_model_runner: forward"),
             self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
@@ -3312,7 +3301,6 @@ class GPUModelRunner(
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
-                force_eager=has_encoder_input,
                 **model_kwargs,
             )
 
