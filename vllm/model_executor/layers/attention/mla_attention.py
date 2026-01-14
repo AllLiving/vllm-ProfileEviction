@@ -214,6 +214,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer, has_nvidia_artifactory
 from vllm.utils.math_utils import cdiv, round_down
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionLayer,
@@ -223,7 +224,6 @@ from vllm.v1.attention.backend import (
     MLAAttentionImpl,
 )
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
-from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     get_per_layer_parameters,
@@ -297,7 +297,7 @@ def _flashinfer_concat_mla_k(
 
     Args:
         k: Output tensor, shape [num_tokens, num_heads, nope_dim + rope_dim].
-           Modified in-place.
+            Modified in-place.
         k_nope: The nope part of k, shape [num_tokens, num_heads, nope_dim].
         k_pe: The rope part of k (shared), shape [num_tokens, 1, rope_dim].
               This is broadcast to all heads.
