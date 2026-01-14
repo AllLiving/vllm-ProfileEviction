@@ -209,6 +209,12 @@ class EngineCore:
         self.async_scheduling = vllm_config.scheduler_config.async_scheduling
 
         self.aborts_queue = queue.Queue[list[str]]()
+
+        # Pause state for "keep" mode - freezes requests in queue.
+        self._scheduler_pause_requested = False
+        self._scheduler_paused = False
+        self._pause_requester_client_index: int | None = None
+
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
         freeze_gc_heap()
@@ -321,6 +327,28 @@ class EngineCore:
         # (i.e. client-aborted vs stop criteria met).
         self.scheduler.finish_requests(request_ids, RequestStatus.FINISHED_ABORTED)
 
+    def pause_scheduler(self, client_index: int | None = None) -> None:
+        """Request the scheduler to pause after the current step.
+
+        Requests are kept frozen in queue and can be resumed later.
+        The pause takes effect after the current step completes.
+
+        Args:
+            client_index: The index of the client requesting the pause.
+                Used to send acknowledgement back to the correct client.
+        """
+        self._scheduler_pause_requested = True
+        self._pause_requester_client_index = client_index
+
+    def resume_scheduler(self) -> None:
+        """Resume the scheduler after a pause.
+
+        Resumes processing of frozen requests in the queue.
+        """
+        self._scheduler_paused = False
+        self._scheduler_pause_requested = False
+        self._pause_requester_client_index = None
+
     @contextmanager
     def log_error_detail(self, scheduler_output: SchedulerOutput):
         """Execute the model and log detailed info on failure."""
@@ -367,12 +395,40 @@ class EngineCore:
         )
         self._iteration_index += 1
 
+    def _check_pause_state(self) -> tuple[dict[int, EngineCoreOutputs], bool] | None:
+        """Check and handle scheduler pause state.
+
+        Returns:
+            None if not paused and processing should continue.
+            A tuple of (outputs, model_executed=False) if paused or pause was
+            just acknowledged.
+        """
+        # Check if pause was requested - acknowledge and enter paused state.
+        if self._scheduler_pause_requested:
+            self._scheduler_paused = True
+            self._scheduler_pause_requested = False
+            # Send acknowledgement to the client that requested the pause.
+            client_idx = self._pause_requester_client_index
+            self._pause_requester_client_index = None
+            if client_idx is not None:
+                return {client_idx: EngineCoreOutputs(pause_acknowledged=True)}, False
+            return {}, False
+
+        # If paused, don't schedule any work.
+        if self._scheduler_paused:
+            return {}, False
+
+        return None
+
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
         """Schedule, execute, and make output.
 
         Returns tuple of outputs and a flag indicating whether the model
         was executed.
         """
+
+        if (pause_result := self._check_pause_state()) is not None:
+            return pause_result
 
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
@@ -424,6 +480,9 @@ class EngineCore:
         batch in the job queue is finished.
         3. Update the scheduler from the output.
         """
+        if (pause_result := self._check_pause_state()) is not None:
+            return pause_result
+
         batch_queue = self.batch_queue
         assert batch_queue is not None
 
@@ -1029,6 +1088,11 @@ class EngineCoreProc(EngineCore):
             )
         elif request_type == EngineCoreRequestType.EXECUTOR_FAILED:
             raise RuntimeError("Executor failed.")
+        elif request_type == EngineCoreRequestType.PAUSE:
+            # request contains the client_index that requested the pause.
+            self.pause_scheduler(client_index=request)
+        elif request_type == EngineCoreRequestType.RESUME:
+            self.resume_scheduler()
         else:
             logger.error(
                 "Unrecognized input request type encountered: %s", request_type
