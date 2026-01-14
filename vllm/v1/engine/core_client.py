@@ -179,6 +179,11 @@ class EngineCoreClient(ABC):
     ) -> None:
         raise NotImplementedError
 
+    def save_serverless_llm_state(
+        self, path: str, pattern: str | None = None, max_size: int | None = None
+    ) -> None:
+        raise NotImplementedError
+
     def collective_rpc(
         self,
         method: str | Callable[..., _R],
@@ -241,6 +246,11 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def save_sharded_state_async(
+        self, path: str, pattern: str | None = None, max_size: int | None = None
+    ) -> None:
+        raise NotImplementedError
+
+    async def save_serverless_llm_state_async(
         self, path: str, pattern: str | None = None, max_size: int | None = None
     ) -> None:
         raise NotImplementedError
@@ -328,6 +338,14 @@ class InprocClient(EngineCoreClient):
         self, path: str, pattern: str | None = None, max_size: int | None = None
     ) -> None:
         self.engine_core.save_sharded_state(path, pattern, max_size)
+
+    def save_serverless_llm_state(
+        self,
+        path: str,
+        pattern: str | None = None,
+        max_size: int | None = None,
+    ) -> None:
+        self.engine_core.save_serverless_llm_state(path, pattern, max_size)
 
     def collective_rpc(
         self,
@@ -808,6 +826,11 @@ class SyncMPClient(MPClient):
     ) -> None:
         self.call_utility("save_sharded_state", path, pattern, max_size)
 
+    def save_serverless_llm_state(
+        self, path: str, pattern: str | None = None, max_size: int | None = None
+    ) -> None:
+        self.call_utility("save_serverless_llm_state", path, pattern, max_size)
+
 
 class AsyncMPClient(MPClient):
     """Asyncio-compatible client for multi-proc EngineCore."""
@@ -1006,6 +1029,13 @@ class AsyncMPClient(MPClient):
         self, path: str, pattern: str | None = None, max_size: int | None = None
     ) -> None:
         await self.call_utility_async("save_sharded_state", path, pattern, max_size)
+
+    async def save_serverless_llm_state_async(
+        self, path: str, pattern: str | None = None, max_size: int | None = None
+    ) -> None:
+        await self.call_utility_async(
+            "save_serverless_llm_state", path, pattern, max_size
+        )
 
     async def collective_rpc_async(
         self,

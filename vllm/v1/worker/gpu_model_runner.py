@@ -57,7 +57,11 @@ from vllm.model_executor.layers.rotary_embedding import (
     MRotaryEmbedding,
     XDRotaryEmbedding,
 )
-from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
+from vllm.model_executor.model_loader import (
+    ServerlessLLMLoader,
+    TensorizerLoader,
+    get_model_loader,
+)
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsMRoPE,
@@ -4002,6 +4006,19 @@ class GPUModelRunner(
         model_loader = get_model_loader(self.load_config)
         logger.info("Reloading weights inplace...")
         model_loader.load_weights(self.get_model(), model_config=self.model_config)
+
+    def save_serverless_llm_state(
+        self,
+        path: str,
+        pattern: str | None = None,
+        max_size: int | None = None,
+    ) -> None:
+        ServerlessLLMLoader.save_model(
+            self.get_model(),
+            path,
+            pattern=pattern,
+            max_size=max_size,
+        )
 
     def save_tensorized_model(
         self,
