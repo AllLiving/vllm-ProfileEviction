@@ -2301,12 +2301,10 @@ class GPUModelRunner(
                 and modality == "video"
                 and num_items > 1
             ):
-                with self._timed_encoder_operation(
-                    should_time, mm_lora_refs, current_item_idx, num_items
-                ):
-                    curr_group_outputs_lst = list[torch.Tensor]()
-                    for video_mm_kwargs_item in filter(
-                        lambda item: item.modality == "video", mm_kwargs
+                curr_group_outputs_lst = list[torch.Tensor]()
+                for video_idx, video_mm_kwargs_item in enumerate(mm_kwargs_group):
+                    with self._timed_encoder_operation(
+                        should_time, mm_lora_refs, current_item_idx + video_idx, 1
                     ):
                         _, _, micro_batch_mm_inputs = next(
                             group_mm_kwargs_by_modality(
@@ -2322,7 +2320,7 @@ class GPUModelRunner(
 
                         curr_group_outputs_lst.extend(micro_batch_outputs)
 
-                    curr_group_outputs = curr_group_outputs_lst
+                curr_group_outputs = curr_group_outputs_lst
             else:
                 # Run the encoder.
                 # `curr_group_outputs` is either of the following:
