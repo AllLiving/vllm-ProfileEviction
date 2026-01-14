@@ -6,7 +6,7 @@ import torch
 
 from vllm.attention.layer import MLAAttention
 from vllm.config import CacheConfig
-from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.custom_op import CustomLayer
 from vllm.model_executor.layers.quantization import QuantizationConfig
 
 
@@ -30,13 +30,10 @@ class MLAModules:
 
 
 # --8<-- [start:multi_head_latent_attention]
-@CustomOp.register("multi_head_latent_attention")
-class MultiHeadLatentAttentionWrapper(CustomOp):
-    """MLA layer registered as CustomOp to allow OOT backends to add
+@CustomLayer.register("multi_head_latent_attention")
+class MultiHeadLatentAttentionWrapper(CustomLayer):
+    """MLA layer registered as CustomLayer to allow OOT backends to add
     custom implementations of the outer MLA layer (including rope & o_proj).
-    Note that currently MLA ignores the enable/disable mechanism of CustomOp
-    because there is only one in-tree implementation in forward_native.
-    TODO: implement this with a new PluggableLayer mechanism.
 
     This class takes positions and hidden_states as input.
     The input tensors can either contain prefill tokens or decode tokens.
@@ -102,7 +99,7 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
             kv_lora_rank=self.kv_lora_rank,
             cache_config=cache_config,
             quant_config=quant_config,
-            prefix=f"{prefix}.attn",
+            prefix=f\"{prefix}.attn\",
             kv_b_proj=self.kv_b_proj,
             use_sparse=self.is_sparse,
             indexer=self.indexer,
@@ -110,7 +107,7 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
 
         self.prefix = prefix
 
-    def forward_native(
+    def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
@@ -174,6 +171,3 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
         )
 
         return self.o_proj(attn_out)[0]
-
-    def forward_cuda(self, *args, **kwargs):
-        return self.forward_native(*args, **kwargs)
