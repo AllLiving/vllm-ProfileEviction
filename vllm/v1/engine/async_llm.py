@@ -7,6 +7,7 @@ import time
 import warnings
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
+from dataclasses import dataclass
 from typing import Any, cast
 
 import torch
@@ -47,6 +48,19 @@ from vllm.v1.metrics.prometheus import shutdown_prometheus
 from vllm.v1.metrics.stats import IterationStats
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class StreamingInput:
+    """Input data for a streaming generation request.
+
+    This is used with generate() to support multi-turn streaming sessions
+    where inputs are provided via an async generator.
+    """
+
+    prompt: EngineCoreRequest | PromptType
+    sampling_params: SamplingParams
+    resumable: bool = True
 
 
 class AsyncLLM(EngineClient):
@@ -271,6 +285,7 @@ class AsyncLLM(EngineClient):
         priority: int = 0,
         data_parallel_rank: int | None = None,
         prompt_text: str | None = None,
+        resumable: bool = False,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
 
@@ -322,6 +337,7 @@ class AsyncLLM(EngineClient):
                 trace_headers,
                 priority,
                 data_parallel_rank,
+                resumable,
             )
             if isinstance(prompt, str):
                 prompt_text = prompt
@@ -339,8 +355,12 @@ class AsyncLLM(EngineClient):
         async with self._pause_cond:
             await self._pause_cond.wait_for(lambda: not self._paused)
 
-        # Create a new output collector for the request.
-        queue = RequestOutputCollector(params.output_kind, request.request_id)
+        # Reuse output collector for streaming session, create new otherwise.
+        existing_state = self.output_processor.request_states.get(request_id)
+        if existing_state and existing_state.queue:
+            queue = existing_state.queue
+        else:
+            queue = RequestOutputCollector(params.output_kind, request.request_id)
 
         # Use cloned params that may have been updated in process_inputs()
         params = request.params
@@ -381,6 +401,62 @@ class AsyncLLM(EngineClient):
         if self.log_requests:
             logger.info("Added request %s.", request.request_id)
 
+    async def _add_streaming_request(
+        self,
+        request_id: str,
+        input_stream: AsyncGenerator[StreamingInput, None],
+        streaming_done: asyncio.Event,
+    ) -> tuple[RequestOutputCollector, asyncio.Task | None, list[int]]:
+        """Handle async generator input stream for streaming sessions."""
+
+        first_input = await input_stream.__anext__()
+
+        if (
+            self.vllm_config.cache_config.kv_sharing_fast_prefill
+            and first_input.sampling_params.prompt_logprobs
+        ):
+            raise ValueError(
+                "--kv-sharing-fast-prefill produces incorrect logprobs for "
+                "prompt tokens, please disable it when the requests need "
+                "prompt logprobs"
+            )
+
+        queue = await self.add_request(
+            request_id,
+            first_input.prompt,
+            first_input.sampling_params,
+            resumable=first_input.resumable,
+        )
+
+        # Track pending outputs: [count]. Use list for mutability in closure.
+        # Starts at 1 for first_input. Background task increments for each
+        # additional input. Main loop decrements when finished=True received.
+        pending_outputs = [1]
+
+        if first_input.resumable:
+            # Start background task to process remaining inputs
+            async def process_remaining():
+                try:
+                    async for streaming_input in input_stream:
+                        pending_outputs[0] += 1
+                        await self.add_request(
+                            request_id,
+                            streaming_input.prompt,
+                            streaming_input.sampling_params,
+                            resumable=streaming_input.resumable,
+                        )
+                        if not streaming_input.resumable:
+                            break
+                finally:
+                    streaming_done.set()
+
+            input_task = asyncio.create_task(process_remaining())
+        else:
+            streaming_done.set()
+            input_task = None
+
+        return queue, input_task, pending_outputs
+
     # TODO: we should support multiple prompts in one call, as you
     # can do with LLM.generate. So that for multi-prompt completion
     # requests we don't need to send multiple messages to core proc,
@@ -388,8 +464,8 @@ class AsyncLLM(EngineClient):
     # re-multiplexed in the API server anyhow.
     async def generate(
         self,
-        prompt: EngineCoreRequest | PromptType,
-        sampling_params: SamplingParams,
+        prompt: EngineCoreRequest | PromptType | AsyncGenerator[StreamingInput, None],
+        sampling_params: SamplingParams | None,
         request_id: str,
         *,
         prompt_text: str | None = None,
@@ -412,40 +488,72 @@ class AsyncLLM(EngineClient):
 
         The caller of generate() iterates the returned AsyncGenerator,
         returning the RequestOutput back to the caller.
+
+        For streaming sessions with an async generator input, pass an
+        AsyncGenerator[StreamingInput, None] as prompt. In this case,
+        sampling_params can be None as each StreamingInput has its own params.
         """
 
         q: RequestOutputCollector | None = None
+        streaming_done: asyncio.Event | None = None
+        input_task: asyncio.Task | None = None
+        pending_outputs: list[int] | None = None
         try:
-            q = await self.add_request(
-                request_id,
-                prompt,
-                sampling_params,
-                lora_request=lora_request,
-                tokenization_kwargs=tokenization_kwargs,
-                trace_headers=trace_headers,
-                priority=priority,
-                data_parallel_rank=data_parallel_rank,
-                prompt_text=prompt_text,
-            )
+            if isinstance(prompt, AsyncGenerator):
+                streaming_done = asyncio.Event()
+                q, input_task, pending_outputs = await self._add_streaming_request(
+                    request_id, prompt, streaming_done
+                )
+            else:
+                if sampling_params is None:
+                    raise ValueError(
+                        "sampling_params is required when prompt is not an "
+                        "AsyncGenerator[StreamingInput, None]"
+                    )
+                q = await self.add_request(
+                    request_id,
+                    prompt,
+                    sampling_params,
+                    lora_request=lora_request,
+                    tokenization_kwargs=tokenization_kwargs,
+                    trace_headers=trace_headers,
+                    priority=priority,
+                    data_parallel_rank=data_parallel_rank,
+                    prompt_text=prompt_text,
+                )
 
             # The output_handler task pushes items into the queue.
             # This task pulls from the queue and yields to caller.
-            finished = False
-            while not finished:
+            while True:
+                if (
+                    input_task is not None
+                    and input_task.done()
+                    and (exc := input_task.exception())
+                ):
+                    raise exc
+
                 # Note: drain queue without await if possible (avoids
                 # task switching under load which helps performance).
                 out = q.get_nowait() or await q.get()
 
                 # Note: both OutputProcessor and EngineCore handle their
                 # own request cleanup based on finished.
-                finished = out.finished
                 assert isinstance(out, RequestOutput)
                 yield out
+
+                if out.finished:
+                    if pending_outputs is not None:
+                        pending_outputs[0] -= 1
+                    # Exit when no more pending outputs
+                    if pending_outputs is None or pending_outputs[0] == 0:
+                        break
 
         # If the request is disconnected by the client, generate()
         # is cancelled or the generator is garbage collected. So,
         # we abort the request if we end up here.
         except (asyncio.CancelledError, GeneratorExit):
+            if input_task is not None:
+                input_task.cancel()
             if q is not None:
                 await self.abort(q.request_id, internal=True)
             if self.log_requests:
@@ -454,18 +562,24 @@ class AsyncLLM(EngineClient):
 
         # Engine is dead. Do not abort since we shut down.
         except EngineDeadError:
+            if input_task is not None:
+                input_task.cancel()
             if self.log_requests:
                 logger.info("Request %s failed (engine dead).", request_id)
             raise
 
         # Request validation error.
         except ValueError as e:
+            if input_task is not None:
+                input_task.cancel()
             if self.log_requests:
                 logger.info("Request %s failed (bad request): %s.", request_id, e)
             raise
 
         # Unexpected error in the generate() task (possibly recoverable).
         except Exception as e:
+            if input_task is not None:
+                input_task.cancel()
             if q is not None:
                 await self.abort(q.request_id, internal=True)
             if self.log_requests:

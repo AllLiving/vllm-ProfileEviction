@@ -465,7 +465,8 @@ class OutputProcessor:
     ) -> None:
         request_id = request.request_id
         if request_id in self.request_states:
-            raise ValueError(f"Request id {request_id} already running.")
+            self._update_streaming_request_state(request, prompt)
+            return
 
         req_state = RequestState.from_new_request(
             tokenizer=self.tokenizer,
@@ -485,6 +486,31 @@ class OutputProcessor:
 
         # Track the external_req_id -> [internal_req_id, ...] mapping
         self.external_req_ids[req_state.external_req_id].append(request_id)
+
+    def _update_streaming_request_state(
+        self, request: EngineCoreRequest, prompt: str | None
+    ) -> None:
+        req_state = self.request_states[request.request_id]
+        if req_state.prompt and prompt:
+            req_state.prompt += prompt
+        elif prompt:
+            req_state.prompt = prompt
+        if request.prompt_token_ids:
+            if req_state.prompt_token_ids is None:
+                req_state.prompt_token_ids = []
+            req_state.prompt_token_ids.extend(request.prompt_token_ids)
+        if req_state.prompt_embeds is not None and request.prompt_embeds is not None:
+            req_state.prompt_embeds = torch.cat(
+                [req_state.prompt_embeds, request.prompt_embeds]
+            )
+        elif request.prompt_embeds is not None:
+            req_state.prompt_embeds = request.prompt_embeds
+        req_state.prompt_len = length_from_prompt_token_ids_or_embeds(
+            req_state.prompt_token_ids, req_state.prompt_embeds
+        )
+        if req_state.stats is not None:
+            req_state.stats.arrival_time = request.arrival_time
+        req_state.is_prefilling = True
 
     def process_outputs(
         self,
@@ -569,7 +595,7 @@ class OutputProcessor:
                     request_outputs.append(request_output)
 
             # Free completed requests.
-            if finish_reason is not None:
+            if finish_reason is not None and not engine_core_output.resumable:
                 self.request_states.pop(req_id)
 
                 internal_ids = self.external_req_ids[req_state.external_req_id]
