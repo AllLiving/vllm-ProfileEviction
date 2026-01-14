@@ -612,19 +612,6 @@ class FusedMoE(CustomOp):
         self.batched_hidden_states: torch.Tensor | None = None
         self.batched_router_logits: torch.Tensor | None = None
 
-        if self.enable_eplb and not self.quant_method.supports_eplb:
-            # TODO: Add support for additional quantization methods.
-            # The implementation for other quantization methods does not
-            # contain essential differences, but the current quant API
-            # design causes duplicated work when extending to new
-            # quantization methods, so I'm leaving it for now.
-            # If you plan to add support for more quantization methods,
-            # please refer to the implementation in `Fp8MoEMethod`.
-            raise NotImplementedError(
-                f"EPLB is not supported {self.quant_method.__class__.__name__}. "
-                "EPLB is only supported for FP8 quantization for now."
-            )
-
         self.capture: Callable[[torch.Tensor], None] | None = None
         if (
             self.vllm_config.model_config is not None
