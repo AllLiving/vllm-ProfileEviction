@@ -156,16 +156,16 @@ def get_timing_stats_from_engine_client(
                                 "encoder_forward_time", 0.0
                             )
                             new_time = stats_dict.get("encoder_forward_time", 0.0)
-                            encoder_stats[request_id]["encoder_forward_time"] = (
-                                current_time + new_time
+                            encoder_stats[request_id]["encoder_forward_time"] = max(
+                                current_time, new_time
                             )
 
                             current_calls = encoder_stats[request_id].get(
                                 "num_encoder_calls", 0
                             )
                             new_calls = stats_dict.get("num_encoder_calls", 0)
-                            encoder_stats[request_id]["num_encoder_calls"] = (
-                                current_calls + new_calls
+                            encoder_stats[request_id]["num_encoder_calls"] = max(
+                                current_calls, new_calls
                             )
     except (AttributeError, RuntimeError):
         pass
