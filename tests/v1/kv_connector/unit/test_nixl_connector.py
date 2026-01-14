@@ -367,6 +367,9 @@ def test_kv_transfer_handshake(dist_init):
         # Decode connector will be able to create handshake with the prefill connector.
         decode_connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
 
+        # We need to register kv_caches to fully initialize the NixlWorker
+        decode_connector.register_kv_caches(kv_caches)
+
         # Here we are testing the retrieval of NIXLAgentMetadata.
         # Knowing the implementation detail, we override the add_remote_agent
         # to validate the metadata received is the same as the one in prefill_connector.
