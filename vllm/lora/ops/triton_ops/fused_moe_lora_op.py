@@ -673,6 +673,7 @@ def _fused_moe_lora_shrink_fake(
     num_stages: int,
     split_k: int,
     mul_routed_weight: bool = False,
+    use_gdc: bool = False,
 ) -> None:
     return
 
@@ -706,6 +707,7 @@ def _fused_moe_lora_expand_fake(
     num_stages: int,
     split_k: int,
     mul_routed_weight: bool = False,
+    use_gdc: bool = False,
 ) -> None:
     return
 
