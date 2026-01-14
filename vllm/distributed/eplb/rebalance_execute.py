@@ -8,7 +8,7 @@ This involves the exchange of expert weights between GPUs.
 
 from collections.abc import Iterable, MutableSequence, Sequence
 from functools import partial
-
+from vllm.platforms import current_platform
 import torch
 from torch.distributed import (
     P2POp,
@@ -106,7 +106,7 @@ def move_to_buffer(
     new_indices: Sequence[int],
     expert_weights: Iterable[torch.Tensor],
     expert_weights_buffer: Sequence[torch.Tensor],
-    cuda_stream: torch.cuda.Stream | None,
+    cuda_stream: torch.cuda.Stream | torch.xpu.Stream | None,
     ep_group: ProcessGroup,
 ) -> tuple[list[bool], list[bool], dict[int, int]]:
     """
@@ -138,7 +138,7 @@ def move_to_buffer(
             if old_indices[src_global] == new_indices[dst_global]:
                 is_received_locally[dst] = True
                 for weight, buffer in zip(expert_weights, expert_weights_buffer):
-                    with torch.cuda.stream(cuda_stream):
+                    with current_platform.stream(cuda_stream):
                         buffer[dst].copy_(weight[src], non_blocking=True)
 
     p2p_ops: list[P2POp] = []
@@ -228,7 +228,7 @@ def move_to_buffer(
 
     # 4. Execute the P2P operations. The real communication happens here.
     if p2p_ops and cuda_stream is not None:
-        with torch.cuda.stream(cuda_stream):
+        with current_platform.stream(cuda_stream):
             reqs = batch_isend_irecv(p2p_ops)
             for req in reqs:
                 req.wait()
@@ -279,7 +279,7 @@ async def transfer_layer(
     ep_group: ProcessGroup,
     is_profile: bool = False,
     layer: int = 0,
-    cuda_stream: torch.cuda.Stream | None = None,
+    cuda_stream: torch.cuda.Stream | torch.xpu.Stream | None = None,
     rank_mapping: dict[int, int] | None = None,
 ) -> tuple[list[bool], list[bool], dict[int, int]]:
     """
@@ -414,7 +414,7 @@ def rearrange_expert_weights_inplace(
 
     # NOTE(bowen): We need this synchronize to run, but I don't know why.
     # If you figure out the reason, please let me know -- thank you!
-    torch.cuda.synchronize()
+    current_platform.synchronize()
 
     for layer in range(num_moe_layers):
         is_unchanged, is_received_locally, experts_recv_loc = move_to_buffer(

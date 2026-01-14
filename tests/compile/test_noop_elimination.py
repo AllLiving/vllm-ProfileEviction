@@ -7,6 +7,7 @@ import torch
 import vllm
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.config import CompilationConfig, CompilationMode, PassConfig, VllmConfig
+from vllm.platforms import current_platform
 
 from .backend import TestBackend
 
@@ -18,7 +19,7 @@ from .backend import TestBackend
 )
 @pytest.mark.parametrize("hidden_size", [64, 4096])
 def test_noop_elimination(dtype, num_tokens, hidden_size, buffer_size):
-    torch.set_default_device("cuda")
+    torch.set_default_device(current_platform.device_name)
     torch.set_default_dtype(dtype)
     torch.manual_seed(1)
 
@@ -89,7 +90,7 @@ def test_non_noop_slice_preserved():
     Regression test for a bug where end=-1 was treated like an inferred
     dimension (reshape semantics) leading to incorrect elimination.
     """
-    torch.set_default_device("cuda")
+    torch.set_default_device(current_platform.device_name)
     x = torch.randn(16, 16)
 
     class SliceModel(torch.nn.Module):

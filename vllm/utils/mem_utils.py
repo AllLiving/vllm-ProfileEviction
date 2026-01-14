@@ -97,11 +97,11 @@ class MemorySnapshot:
         # After `torch.cuda.reset_peak_memory_stats()`,
         # `torch.cuda.memory_reserved()` will keep growing, and only shrink
         # when we call `torch.cuda.empty_cache()` or OOM happens.
-        self.torch_peak = torch.cuda.memory_stats(device).get(
+        self.torch_peak = torch.accelerator.memory_stats(device).get(
             "allocated_bytes.all.peak", 0
         )
-
-        self.free_memory, self.total_memory = torch.cuda.mem_get_info(device)
+        print(device)
+        self.free_memory, self.total_memory = current_platform.mem_get_info(device)
         shared_sysmem_device_mem_sms = ((8, 7), (11, 0), (12, 1))  # Orin, Thor, Spark
         if (
             current_platform.is_cuda()
@@ -126,7 +126,7 @@ class MemorySnapshot:
         # torch.cuda.memory_reserved() is how many bytes
         # PyTorch gets from cuda (by calling cudaMalloc, etc.)
         # this is used to measure the non-torch memory usage
-        self.torch_memory = torch.cuda.memory_reserved(device)
+        self.torch_memory = torch.accelerator.memory_reserved(device)
 
         self.non_torch_memory = self.cuda_memory - self.torch_memory
         self.timestamp = time.time()
