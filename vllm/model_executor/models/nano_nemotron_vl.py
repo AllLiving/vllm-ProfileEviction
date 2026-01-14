@@ -23,7 +23,6 @@ import torch.nn as nn
 import torchvision.transforms as T
 from PIL import Image
 from transformers import BatchFeature, PretrainedConfig, TensorType
-from typing_extensions import assert_never
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
@@ -587,7 +586,10 @@ class DynamicResolutionImageTiler:
                 num_tokens_available_per_media = (
                     scaled_down_num_tokens_available_per_media
                 )
-        assert_never(num_tokens_available_per_media)
+        ctx = f"{params=} {total_tokens=} {num_tokens_available=}"
+        raise ValueError(
+            f"Should be unreachable - `return params` above must be reached: {ctx}"
+        )
 
     @staticmethod
     def stack(images: list[torch.Tensor], patch_size: int) -> torch.Tensor:
