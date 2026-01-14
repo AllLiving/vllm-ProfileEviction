@@ -11,6 +11,82 @@ from vllm.platforms import current_platform
 logger = init_logger(__name__)
 
 
+class CustomLayer(nn.Module):
+    """
+    Base class for custom layers.
+
+    A CustomLayer is a *module-composing* abstraction: it may instantiate other
+    ``torch.nn.Module`` objects as sub-layers, and its functionality depends on
+    these sub-layers following a generalized invocation sequence.
+
+    Unlike :class:`CustomOp`, CustomLayer does NOT provide per-platform
+    ``forward_*`` dispatch. Instead, it supports out-of-tree (OOT) replacement
+    of the entire layer class at instantiation time, allowing customized
+    initialization and submodule composition.
+    """
+
+    def __new__(cls, *args, **kwargs):
+        try:
+            layer_class_name = cls.__name__
+        except AttributeError:
+            raise TypeError(
+                f"Cannot instantiate '{cls.__name__}': its 'name' attribute "
+                f"was not set, possibly because it was not decorated with "
+                f"@CustomLayer.register, or it's the CustomLayer base class itself."
+            ) from None
+
+        if layer_class_name not in cls.layer_registry_oot:
+            layer_cls_to_instantiate = cls
+        else:
+            layer_cls_to_instantiate = cls.layer_registry_oot[layer_class_name]
+            logger.debug(
+                "Instantiating custom layer: %s using %s",
+                layer_class_name,
+                str(layer_cls_to_instantiate),
+            )
+        return super().__new__(layer_cls_to_instantiate)
+
+    # Dictionary of all custom layers (classes, indexed by registered name).
+    layer_registry: dict[str, type["CustomLayer"]] = {}
+    layer_registry_oot: dict[str, type["CustomLayer"]] = {}
+
+    # Decorator to register custom layers.
+    @classmethod
+    def register(cls, name: str):
+        def decorator(layer_cls):
+            assert name not in cls.layer_registry, f"Duplicate layer name: {name}"
+            layer_cls.name = name
+            cls.layer_registry[name] = layer_cls
+            return layer_cls
+
+        return decorator
+
+    # Decorator to register out-of-tree(oot) custom layers.
+    # For OOT custom layers:
+    #   if in-tree layer class is registered with an oot_custom_layer,
+    #   the oot_custom_layer will be used instead.
+    @classmethod
+    def register_oot(cls, _decorated_layer_cls=None, name: str | None = None):
+        def decorator(layer_cls):
+            reg_name = name if name is not None else cls.__name__
+            assert reg_name not in cls.layer_registry_oot, (
+                f"Duplicate layer name: {reg_name}"
+            )
+            layer_cls.name = reg_name
+            cls.layer_registry_oot[reg_name] = layer_cls
+            return layer_cls
+
+        if _decorated_layer_cls is None:
+            # Called with parentheses: @CustomLayer.register_oot()
+            # or @CustomLayer.register_oot(name="...")
+            return decorator
+        elif isinstance(_decorated_layer_cls, type):  # Check if it's a class
+            # Called without parentheses: @CustomLayer.register_oot
+            return decorator(_decorated_layer_cls)
+        else:
+            raise TypeError("Decorator can only be applied to classes.")
+
+
 class CustomOp(nn.Module):
     """
     Base class for custom ops.
@@ -19,7 +95,9 @@ class CustomOp(nn.Module):
 
     def __new__(cls, *args, **kwargs):
         try:
-            op_name = cls.__name__
+            # Accessing __name__ here mainly preserves the earlier
+            # error message behavior for improperly constructed subclasses.
+            _ = cls.__name__
         except AttributeError:
             raise TypeError(
                 f"Cannot instantiate '{cls.__name__}': its 'name' attribute "
@@ -27,16 +105,10 @@ class CustomOp(nn.Module):
                 f"@CustomOp.register, or it's the CustomOp base class itself."
             ) from None
 
-        if op_name not in cls.op_registry_oot:
-            op_cls_to_instantiate = cls
-        else:
-            op_cls_to_instantiate = cls.op_registry_oot[op_name]
-            logger.debug(
-                "Instantiating custom op: %s using %s",
-                op_name,
-                str(op_cls_to_instantiate),
-            )
-        return super().__new__(op_cls_to_instantiate)
+        # For primitive ops, we always instantiate the in-tree class.
+        # Backend- or platform-specific behavior should be expressed via the
+        # platform-dispatched forward_* methods, not by swapping classes.
+        return super().__new__(cls)
 
     def __init__(self, enforce_enable: bool = False):
         super().__init__()
@@ -156,7 +228,6 @@ class CustomOp(nn.Module):
     # - MyOp.enabled()
     # - op_registry["my_op"].enabled()
     op_registry: dict[str, type["CustomOp"]] = {}
-    op_registry_oot: dict[str, type["CustomOp"]] = {}
 
     # Decorator to register custom ops.
     @classmethod
@@ -168,36 +239,3 @@ class CustomOp(nn.Module):
             return op_cls
 
         return decorator
-
-    # Decorator to register out-of-tree(oot) custom ops.
-    # For OOT custom ops:
-    #   if in-tree layer class is registered with an oot_custom_op layer,
-    #   the oot_custom_op layer will be used instead.
-    # Example:
-    # - @UnquantizedFusedMoEMethod.register_oot
-    #   class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod)
-    # or
-    # - @CustomOP.register_oot(name="UnquantizedFusedMoEMethod")
-    @classmethod
-    def register_oot(cls, _decorated_op_cls=None, name: str | None = None):
-        def decorator(op_cls):
-            reg_name = name if name is not None else cls.__name__
-            assert reg_name not in cls.op_registry_oot, f"Duplicate op name: {reg_name}"
-            op_cls.name = reg_name
-            cls.op_registry_oot[reg_name] = op_cls
-            return op_cls
-
-        if _decorated_op_cls is None:
-            # Called with parentheses: @CustomOP.register_oot()
-            # or @CustomOP.register_oot(name="...")
-            # So, _decorated_op_cls is None.
-            # We return the actual decorator function.
-            return decorator
-        elif isinstance(_decorated_op_cls, type):  # Check if it's a class
-            # Called without parentheses: @CustomOP.register_oot
-            # The first argument is the class itself.
-            # We call the 'decorator' function immediately with the class.
-            return decorator(_decorated_op_cls)
-        else:
-            # Handle other unexpected cases if necessary
-            raise TypeError("Decorator can only be applied to classes.")

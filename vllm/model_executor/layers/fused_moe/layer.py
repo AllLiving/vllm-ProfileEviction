@@ -24,7 +24,7 @@ from vllm.distributed import (
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.custom_op import CustomLayer
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -306,8 +306,8 @@ class FusedMoERouterImpl(FusedMoERouter):
 
 
 # --8<-- [start:fused_moe]
-@CustomOp.register("fused_moe")
-class FusedMoE(CustomOp):
+@CustomLayer.register("fused_moe")
+class FusedMoE(CustomLayer):
     """FusedMoE layer for MoE models.
 
     This layer contains both MergedColumnParallel weights (gate_up_proj /
@@ -1702,7 +1702,7 @@ class FusedMoE(CustomOp):
         else:
             return tensor_model_parallel_all_reduce(final_hidden_states)
 
-    def forward_native(
+    def forward(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
@@ -1760,13 +1760,6 @@ class FusedMoE(CustomOp):
         return (
             self._expert_map if not self.rocm_aiter_fmoe_enabled else self.expert_mask
         )
-
-    def forward_cuda(
-        self,
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        return self.forward_native(hidden_states, router_logits)
 
     def forward_impl_chunked(
         self,
