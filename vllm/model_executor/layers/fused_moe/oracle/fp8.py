@@ -69,11 +69,13 @@ def select_fp8_moe_backend(
     def _make_log_backend(backend_name: str):
         return f"Using {backend_name} backend for FP8 MoE"
 
-    # Prefer FlashInfer backends on supported GPUs; allow SM90 and SM100.
+    # Prefer FlashInfer backends on supported GPUs:
+    # - SM90 (Hopper)
+    # - Blackwell-class: SM100/SM103 (B100/B200), SM120/SM121 (GB10 DGX Spark)
     if (
         current_platform.is_cuda()
         and (
-            current_platform.is_device_capability_family(100)
+            current_platform.is_blackwell_class()
             or current_platform.is_device_capability(90)
         )
         and envs.VLLM_USE_FLASHINFER_MOE_FP8
@@ -92,9 +94,10 @@ def select_fp8_moe_backend(
             return Fp8MoeBackend.FLASHINFER_TRTLLM
         else:
             if block_quant and current_platform.is_device_capability_family(100):
+                # Block quant throughput backend limitation only affects SM100
                 raise ValueError(
                     "FlashInfer FP8 MoE throughput backend does not "
-                    "support block quantization on SM100. Please use "
+                    "support block quantization on SM100/SM103. Please use "
                     "VLLM_FLASHINFER_MOE_BACKEND=latency to use the "
                     "FlashInfer TRTLLM backend instead."
                 )
