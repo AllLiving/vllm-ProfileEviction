@@ -649,7 +649,7 @@ class BaseNanoNemotronVLProcessor(ABC):
 
         self.dynamic_tiler: DynamicResolutionImageTiler | None = None
         if self.use_dynamic_resolution(config):
-            self.dynamic_tiler: DynamicResolutionImageTiler = (
+            self.dynamic_tiler = (
                 DynamicResolutionImageTiler(
                     max_model_len=max_model_len,
                     patch_size=patch_size,
