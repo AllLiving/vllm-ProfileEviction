@@ -649,14 +649,12 @@ class BaseNanoNemotronVLProcessor(ABC):
 
         self.dynamic_tiler: DynamicResolutionImageTiler | None = None
         if self.use_dynamic_resolution(config):
-            self.dynamic_tiler = (
-                DynamicResolutionImageTiler(
-                    max_model_len=max_model_len,
-                    patch_size=patch_size,
-                    downsample_ratio=downsample_ratio,
-                    min_num_patches=config.vision_config.args["min_num_patches"],
-                    max_num_patches=config.vision_config.args["max_num_patches"],
-                )
+            self.dynamic_tiler = DynamicResolutionImageTiler(
+                max_model_len=max_model_len,
+                patch_size=patch_size,
+                downsample_ratio=downsample_ratio,
+                min_num_patches=config.vision_config.args["min_num_patches"],
+                max_num_patches=config.vision_config.args["max_num_patches"],
             )
 
     @staticmethod
