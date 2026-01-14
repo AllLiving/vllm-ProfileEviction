@@ -2302,7 +2302,8 @@ class GPUModelRunner(
                 and num_items > 1
             ):
                 curr_group_outputs_lst = list[torch.Tensor]()
-                for video_idx, video_mm_kwargs_item in enumerate(mm_kwargs_group):
+                for video_idx in range(num_items):
+                    video_mm_kwargs_item = mm_kwargs[current_item_idx + video_idx]
                     with self._timed_encoder_operation(
                         should_time, mm_lora_refs, current_item_idx + video_idx, 1
                     ):
