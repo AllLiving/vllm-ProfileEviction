@@ -51,6 +51,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
+    _quantize_input_fp4_with_linear_scales,
     build_flashinfer_fp4_cutlass_moe_prepare_finalize,
     flashinfer_trtllm_fp4_moe,
     flashinfer_trtllm_fp4_routed_moe,
@@ -1571,15 +1572,14 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         router_logits: torch.Tensor,
     ) -> tuple[torch.Tensor, list[torch.Tensor]]:
         """Optionally prepare extra tensors to carry through DP allgather/EP."""
-        import flashinfer
-
         assert self.moe_quant_config is not None
         a1_gscale = self.moe_quant_config.a1_gscale
-        hidden_states_fp4, hidden_states_sf = flashinfer.fp4_quantize(
-            hidden_states,
-            a1_gscale,
-            is_sf_swizzled_layout=False,
+
+        # Quantize using vLLM native op and convert to linear layout
+        hidden_states_fp4, hidden_states_sf = _quantize_input_fp4_with_linear_scales(
+            hidden_states, a1_gscale
         )
+
         extra_tensors: list[torch.Tensor] = [hidden_states_sf]
         return hidden_states_fp4, extra_tensors
 
