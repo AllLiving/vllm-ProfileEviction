@@ -367,6 +367,9 @@ def test_kv_transfer_handshake(dist_init):
         # Decode connector will be able to create handshake with the prefill connector.
         decode_connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
 
+        # We need to register kv_caches to fully initialize the NixlWorker
+        decode_connector.register_kv_caches(kv_caches)
+
         # Here we are testing the retrieval of NIXLAgentMetadata.
         # Knowing the implementation detail, we override the add_remote_agent
         # to validate the metadata received is the same as the one in prefill_connector.
@@ -402,6 +405,19 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         self.kv_cache_layout = kv_cache_layout
         # Mock register_kv_caches attribute needed for tests that do not call it.
         self.src_xfer_handles_by_block_size = {self.block_size: 1}
+
+        kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
+            num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
+        )
+        shared_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+        unique_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+        kv_caches = {
+            "layer0": shared_tensor,
+            "layer1": unique_tensor,
+            "layer2": shared_tensor,
+        }
+
+        self.register_kv_caches(kv_caches)
 
     def _nixl_handshake(
         self, host: str, port: int, remote_tp_size: int, expected_engine_id: str
@@ -2042,6 +2058,19 @@ def test_compatibility_hash_validation(
     decode_connector = NixlConnector(local_vllm_config, KVConnectorRole.WORKER)
     decode_worker = decode_connector.connector_worker
 
+    kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
+        num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
+    )
+    shared_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+    unique_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+    kv_caches = {
+        "layer0": shared_tensor,
+        "layer1": unique_tensor,
+        "layer2": shared_tensor,
+    }
+
+    decode_worker.register_kv_caches(kv_caches)
+
     remote_config_params: dict[str, Any] = {
         "model": "facebook/opt-125m",
         "block_size": 16,
@@ -2141,6 +2170,19 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
     )
     decode_connector = NixlConnector(local_vllm_config, KVConnectorRole.WORKER)
     decode_worker = decode_connector.connector_worker
+
+    kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
+        num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
+    )
+    shared_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+    unique_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+    kv_caches = {
+        "layer0": shared_tensor,
+        "layer1": unique_tensor,
+        "layer2": shared_tensor,
+    }
+
+    decode_worker.register_kv_caches(kv_caches)
 
     if error_scenario == "handshake_decode_error":
         msg_bytes = b"this is not valid msgpack data"
