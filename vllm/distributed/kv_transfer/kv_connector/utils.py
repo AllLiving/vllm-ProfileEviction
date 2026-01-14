@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 EngineId = str
+BlockIds = tuple[list[int], ...] | list[list[int]]
 
 
 def get_kv_connector_cache_layout():
@@ -300,6 +301,21 @@ def yield_req_data(
         cached_reqs.new_block_ids,
         (req_id in cached_reqs.resumed_req_ids for req_id in cached_reqs.req_ids),
     )
+
+
+def get_blocks_in_fa_kv_group(
+    block_ids: BlockIds,
+) -> list[int]:
+    """
+    Get blocks in the full attention KV group, which we assume to be the largest group.
+    Note that when HMA is disabled or the model is not hybrid,
+    a single group is present here.
+    """
+    if not block_ids:
+        # Full prefix cache hit case
+        return []
+    argmax_i = max(range(len(block_ids)), key=lambda x: len(block_ids[x]))
+    return block_ids[argmax_i]
 
 
 @dataclass
