@@ -311,3 +311,9 @@ def supports_pdl(device: torch.device | None = None) -> bool:
     """
     # PDL requires compute capability SM90 or above
     return current_platform.is_cuda() and current_platform.has_device_capability(90)
+
+
+@lru_cache
+def supports_tma(device: torch.device | None = None) -> bool:
+    # TMA requires compute capability SM90 or above
+    return current_platform.is_cuda() and current_platform.has_device_capability(90)
