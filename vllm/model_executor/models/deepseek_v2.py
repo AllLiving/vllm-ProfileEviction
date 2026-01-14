@@ -736,6 +736,15 @@ def sparse_attn_indexer(
             )
 
             fp8_paged_mqa_logits_func = rocm_fp8_paged_mqa_logits
+        if weights.shape[0] < num_padded_tokens:
+            new_shape = (num_padded_tokens,) + weights.shape[1:]
+            padded_weights = torch.zeros(
+                new_shape,
+                dtype=weights.dtype,
+                device=weights.device,
+            )
+            padded_weights[: weights.shape[0]] = weights
+            weights = padded_weights
         logits = fp8_paged_mqa_logits_func(
             padded_q_fp8_decode_tokens,
             kv_cache,
@@ -746,7 +755,7 @@ def sparse_attn_indexer(
             max_model_len=max_model_len,
         )
         num_rows = logits.shape[0]
-        topk_indices = topk_indices_buffer[:num_decode_tokens, :topk_tokens]
+        topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
         torch.ops._C.top_k_per_row_decode(
             logits,
