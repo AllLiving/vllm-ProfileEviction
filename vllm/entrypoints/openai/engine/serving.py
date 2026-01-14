@@ -1360,6 +1360,7 @@ class OpenAIServing:
         context: ConversationContext,
         lora_request: LoRARequest | None = None,
         priority: int = 0,
+        tier: float = 1.0,
         **kwargs,
     ):
         prompt_text, _, _ = self._get_prompt_components(engine_prompt)
@@ -1391,6 +1392,7 @@ class OpenAIServing:
                 sub_request_id,
                 lora_request=lora_request,
                 priority=priority,
+                tier=tier,
                 prompt_text=prompt_text,
                 tokenization_kwargs=tokenization_kwargs,
                 **kwargs,
