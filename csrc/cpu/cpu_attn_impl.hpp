@@ -12,7 +12,7 @@
 #include "cpu/utils.hpp"
 
 namespace cpu_attention {
-enum class ISA { AMX, VEC, VEC16, NEON };
+enum class ISA { AMX, VEC, VEC16, NEON, NEON_BFMMLA };
 
 template <ISA isa, typename scalar_t, int64_t head_dim>
 class AttentionImpl {};
@@ -146,6 +146,9 @@ struct AttentionMetadata {
         break;
       case ISA::NEON:
         ss << "NEON, ";
+        break;
+      case ISA::NEON_BFMMLA:
+        ss << "NEON_BFMMLA, ";
         break;
     }
     ss << "workitem_group_num: " << workitem_group_num
@@ -1035,20 +1038,23 @@ class AttentionMainLoop {
         // }
       }
 
-      // compute P@V
+      // compute P@V: output[q_head_num, head_dim] = P[q_head_num, K] @ V[K,
+      // head_dim]
+      //
+      // ISA-specific optimization: NEON BFMMLA uses TokenRow V-cache layout
+      // enabling single GEMM call for full head_dim output per block (vs.
+      // head_dim/32 chunked GEMMs)
       {
         int32_t curr_group_offset =
             start_block_group_offset * v_cache_token_group_stride;
         int32_t curr_group_num_in_block =
             token_group_num_per_block - start_block_group_offset;
         int32_t remaining_group_num = token_group_num;
-        int32_t head_dim_group_num = head_dim / headdim_alignment;
         prob_buffer_t* curr_prob_buffer =
             reinterpret_cast<prob_buffer_t*>(logits_buffer);
         int64_t prob_buffer_stride =
             kv_tile_token_num *
             (sizeof(logits_buffer_t) / sizeof(prob_buffer_t));
-        partial_output_buffer_t* curr_partial_q_buffer = partial_q_buffer;
         bool accum_c = !is_first_iter;
         for (int32_t block_idx = start_block_idx; block_idx < end_block_idx;
              ++block_idx) {
@@ -1062,27 +1068,39 @@ class AttentionMainLoop {
           int32_t curr_token_num =
               curr_group_num_in_block * blocksize_alignment;
 
-          for (int32_t head_dim_group_idx = 0;
-               head_dim_group_idx < head_dim_group_num; ++head_dim_group_idx) {
-            // output_tile = p_tile @ v_tile, [MaxQHeadNumPerIteration,
-            // HeadDimAlignment] = [MaxQHeadNumPerIteration, block_size] @
-            // [block_size, HeadDimAlignment]
-            tile_gemm_t::template gemm<AttentionGemmPhase::PV, -1>(
+          if constexpr (ISAType == ISA::NEON_BFMMLA) {
+            // Single GEMM for full [q_head_num × head_dim] output (TokenRow
+            // V-cache)
+            tile_gemm_t::template gemm<AttentionGemmPhase::PV, head_dim>(
                 q_head_num, curr_prob_buffer, v_cache_block_ptr,
-                curr_partial_q_buffer, prob_buffer_stride, head_dim, head_dim,
+                partial_q_buffer, prob_buffer_stride, head_dim, head_dim,
                 block_size, curr_token_num, accum_c);
+          } else {
+            // Loop over head_dim in HeadDimAlignment chunks (row-major V-cache)
+            partial_output_buffer_t* curr_partial_q_buffer = partial_q_buffer;
+            int32_t head_dim_group_num = head_dim / headdim_alignment;
+            for (int32_t head_dim_group_idx = 0;
+                 head_dim_group_idx < head_dim_group_num;
+                 ++head_dim_group_idx) {
+              // output_tile = p_tile @ v_tile, [MaxQHeadNumPerIteration,
+              // HeadDimAlignment] = [MaxQHeadNumPerIteration, block_size] @
+              // [block_size, HeadDimAlignment]
+              tile_gemm_t::template gemm<AttentionGemmPhase::PV, head_dim>(
+                  q_head_num, curr_prob_buffer, v_cache_block_ptr,
+                  curr_partial_q_buffer, prob_buffer_stride, head_dim, head_dim,
+                  block_size, curr_token_num, accum_c);
 
-            // Update
-            curr_partial_q_buffer += headdim_alignment;
-            v_cache_block_ptr += v_cache_head_group_stride;
+              // Update
+              curr_partial_q_buffer += headdim_alignment;
+              v_cache_block_ptr += v_cache_head_group_stride;
+            }
           }
 
-          // Update
+          // Update for next block
           remaining_group_num -= curr_group_num_in_block;
           curr_group_offset = 0;
           curr_group_num_in_block = token_group_num_per_block;
           curr_prob_buffer += curr_token_num;
-          curr_partial_q_buffer = partial_q_buffer;
           accum_c = true;
         }
       }

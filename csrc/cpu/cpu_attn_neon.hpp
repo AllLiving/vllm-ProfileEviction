@@ -8,9 +8,9 @@ namespace cpu_attention {
 
 namespace {
 
-#define BLOCK_SIZE_ALIGNMENT 32
-#define HEAD_SIZE_ALIGNMENT 32
-#define MAX_Q_HEAD_NUM_PER_ITER 16
+#define NEON_BLOCK_SIZE_ALIGNMENT 32
+#define NEON_HEAD_SIZE_ALIGNMENT 32
+#define NEON_MAX_Q_HEAD_NUM_PER_ITER 16
 
 // These do not use vectorized class for loading / converting
 // because csrc/cpu/cpu_types_arm.hpp does not have fallback options
@@ -18,20 +18,21 @@ namespace {
 // doesn't support BF16.
 // We don't use vec_op::FP32Vec* or vec_op::FP16Vec* for consistency.
 template <typename kv_cache_t>
-FORCE_INLINE void load_row8_B_as_f32(const kv_cache_t* p, float32x4_t& b0,
-                                     float32x4_t& b1);
+FORCE_INLINE void load_row8_B_as_f32_neon(const kv_cache_t* p, float32x4_t& b0,
+                                          float32x4_t& b1);
 
 template <>
-FORCE_INLINE void load_row8_B_as_f32<float>(const float* p, float32x4_t& b0,
-                                            float32x4_t& b1) {
+FORCE_INLINE void load_row8_B_as_f32_neon<float>(const float* p,
+                                                 float32x4_t& b0,
+                                                 float32x4_t& b1) {
   b0 = vld1q_f32(p + 0);
   b1 = vld1q_f32(p + 4);
 }
 
 template <>
-FORCE_INLINE void load_row8_B_as_f32<c10::Half>(const c10::Half* p,
-                                                float32x4_t& b0,
-                                                float32x4_t& b1) {
+FORCE_INLINE void load_row8_B_as_f32_neon<c10::Half>(const c10::Half* p,
+                                                     float32x4_t& b0,
+                                                     float32x4_t& b1) {
   const float16_t* h = reinterpret_cast<const float16_t*>(p);
   float16x8_t v = vld1q_f16(h);
   b0 = vcvt_f32_f16(vget_low_f16(v));
@@ -39,9 +40,9 @@ FORCE_INLINE void load_row8_B_as_f32<c10::Half>(const c10::Half* p,
 }
 
 template <>
-FORCE_INLINE void load_row8_B_as_f32<c10::BFloat16>(const c10::BFloat16* p,
-                                                    float32x4_t& b0,
-                                                    float32x4_t& b1) {
+FORCE_INLINE void load_row8_B_as_f32_neon<c10::BFloat16>(const c10::BFloat16* p,
+                                                         float32x4_t& b0,
+                                                         float32x4_t& b1) {
   const uint16_t* u = reinterpret_cast<const uint16_t*>(p);
 #ifdef ARM_BF16_SUPPORT
   uint16x8_t u0 = vld1q_u16(u);
@@ -119,7 +120,7 @@ FORCE_INLINE void gemm_micro_neon_fmla_Mx8_Ku4(
     // k + 0
     {
       float32x4_t b0, b1;
-      load_row8_B_as_f32<kv_cache_t>(B + (int64_t)(k + 0) * ldb, b0, b1);
+      load_row8_B_as_f32_neon<kv_cache_t>(B + (int64_t)(k + 0) * ldb, b0, b1);
 #define STEP_K0(i) FMAS_LANE(i, a##i##v, 0)
       ROWS_APPLY(STEP_K0)
 #undef STEP_K0
@@ -127,7 +128,7 @@ FORCE_INLINE void gemm_micro_neon_fmla_Mx8_Ku4(
     // k + 1
     {
       float32x4_t b0, b1;
-      load_row8_B_as_f32<kv_cache_t>(B + (int64_t)(k + 1) * ldb, b0, b1);
+      load_row8_B_as_f32_neon<kv_cache_t>(B + (int64_t)(k + 1) * ldb, b0, b1);
 #define STEP_K1(i) FMAS_LANE(i, a##i##v, 1)
       ROWS_APPLY(STEP_K1)
 #undef STEP_K1
@@ -135,7 +136,7 @@ FORCE_INLINE void gemm_micro_neon_fmla_Mx8_Ku4(
     // k + 2
     {
       float32x4_t b0, b1;
-      load_row8_B_as_f32<kv_cache_t>(B + (int64_t)(k + 2) * ldb, b0, b1);
+      load_row8_B_as_f32_neon<kv_cache_t>(B + (int64_t)(k + 2) * ldb, b0, b1);
 #define STEP_K2(i) FMAS_LANE(i, a##i##v, 2)
       ROWS_APPLY(STEP_K2)
 #undef STEP_K2
@@ -143,7 +144,7 @@ FORCE_INLINE void gemm_micro_neon_fmla_Mx8_Ku4(
     // k + 3
     {
       float32x4_t b0, b1;
-      load_row8_B_as_f32<kv_cache_t>(B + (int64_t)(k + 3) * ldb, b0, b1);
+      load_row8_B_as_f32_neon<kv_cache_t>(B + (int64_t)(k + 3) * ldb, b0, b1);
 #define STEP_K3(i) FMAS_LANE(i, a##i##v, 3)
       ROWS_APPLY(STEP_K3)
 #undef STEP_K3
@@ -154,7 +155,7 @@ FORCE_INLINE void gemm_micro_neon_fmla_Mx8_Ku4(
   // K tail
   for (; k < K; ++k) {
     float32x4_t b0, b1;
-    load_row8_B_as_f32<kv_cache_t>(B + (int64_t)k * ldb, b0, b1);
+    load_row8_B_as_f32_neon<kv_cache_t>(B + (int64_t)k * ldb, b0, b1);
 #define TAIL_ROW(i)                             \
   IF_M(i) {                                     \
     float32x4_t ai = vdupq_n_f32(*(a##i + k));  \
@@ -232,10 +233,10 @@ class TileGemmNeonFMLA {
                                 const int32_t dynamic_k_size,
                                 const bool accum_c) {
     if constexpr (phase == AttentionGemmPhase::QK) {
-      gemm_macro_neon_fmla_Mx8_Ku4<BLOCK_SIZE_ALIGNMENT, kv_cache_t>(
+      gemm_macro_neon_fmla_Mx8_Ku4<NEON_BLOCK_SIZE_ALIGNMENT, kv_cache_t>(
           a_tile, b_tile, c_tile, m_size, k_size, lda, ldb, ldc, accum_c);
     } else {
-      gemm_macro_neon_fmla_Mx8_Ku4<HEAD_SIZE_ALIGNMENT, kv_cache_t>(
+      gemm_macro_neon_fmla_Mx8_Ku4<NEON_HEAD_SIZE_ALIGNMENT, kv_cache_t>(
           a_tile, b_tile, c_tile, m_size, dynamic_k_size, lda, ldb, ldc,
           accum_c);
     }
@@ -256,10 +257,11 @@ class AttentionImpl<ISA::NEON, scalar_t, head_dim> {
   using prob_buffer_t = float;
 
   constexpr static int64_t BlockSizeAlignment =
-      BLOCK_SIZE_ALIGNMENT;  // KV token num unit of QK and PV phases
+      NEON_BLOCK_SIZE_ALIGNMENT;  // KV token num unit of QK and PV phases
   constexpr static int64_t HeadDimAlignment =
-      HEAD_SIZE_ALIGNMENT;  // headdim num unit of PV phase
-  constexpr static int64_t MaxQHeadNumPerIteration = MAX_Q_HEAD_NUM_PER_ITER;
+      NEON_HEAD_SIZE_ALIGNMENT;  // headdim num unit of PV phase
+  constexpr static int64_t MaxQHeadNumPerIteration =
+      NEON_MAX_Q_HEAD_NUM_PER_ITER;
   constexpr static int64_t HeadDim = head_dim;
   constexpr static ISA ISAType = ISA::NEON;
   constexpr static bool scale_on_logits = false;  // apply scale on q_buffer
@@ -382,5 +384,9 @@ class AttentionImpl<ISA::NEON, scalar_t, head_dim> {
   }
 };
 }  // namespace cpu_attention
+
+#undef NEON_BLOCK_SIZE_ALIGNMENT
+#undef NEON_HEAD_SIZE_ALIGNMENT
+#undef NEON_MAX_Q_HEAD_NUM_PER_ITER
 
 #endif  // #ifndef CPU_ATTN_NEON_HPP
