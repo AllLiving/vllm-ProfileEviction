@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Literal, get_args
+from typing import Literal, get_args
 
 from pydantic.dataclasses import dataclass
 
-from vllm.config.utils import config
+from vllm.config.utils import CompileFactors, config
 from vllm.logger import init_logger
-from vllm.utils.hashing import safe_hash
 
 logger = init_logger(__name__)
 
@@ -144,7 +143,7 @@ class PoolerConfig:
         assert self.tok_pooling_type is not None, "Should be resolved by ModelConfig"
         return self.tok_pooling_type
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> CompileFactors:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -158,9 +157,8 @@ class PoolerConfig:
         """
         # no factors to consider.
         # this config will not affect the computation graph.
-        factors: list[Any] = []
-        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        # No compile-time factors.
+        return {}
 
 
 def get_use_activation(o: object):
