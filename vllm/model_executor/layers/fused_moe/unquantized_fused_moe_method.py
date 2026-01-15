@@ -121,14 +121,18 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             == FusedMoEActivationFormat.BatchedExperts
         ):
             logger.debug("BatchedTritonExperts %s", self.moe)
-            return BatchedTritonExperts(
+            return BatchedTritonExperts.make_batched_experts(
+                moe_config=self.moe,
+                quant_config=self.moe_quant_config,
                 max_num_tokens=self.moe.max_num_tokens,
                 num_dispatchers=prepare_finalize.num_dispatchers(),
-                quant_config=self.moe_quant_config,
             )
         else:
             logger.debug("TritonExperts %s", self.moe)
-            return TritonExperts(self.moe_quant_config)
+            return TritonExperts(
+                moe_config=self.moe,
+                quant_config=self.moe_quant_config,
+            )
 
     def create_weights(
         self,
@@ -257,8 +261,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 self.use_inplace = True
                 self.kernel = mk.FusedMoEModularKernel(
                     MoEPrepareAndFinalizeNoEP(),
-                    AiterExperts(self.moe_quant_config),
-                    shared_experts=None,
+                    AiterExperts(
+                        moe_config=self.moe_quant_config,
+                        quant_config=self.moe_quant_config,
+                    ),
                 )
 
             elif self.flashinfer_cutlass_moe_enabled:
@@ -270,19 +276,18 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 self.kernel = mk.FusedMoEModularKernel(
                     MoEPrepareAndFinalizeNoEP(),
                     FlashInferExperts(
-                        out_dtype=layer.params_dtype,
+                        moe_config=self.moe,
                         quant_config=self.moe_quant_config,
-                        tp_rank=self.moe.moe_parallel_config.tp_rank,
-                        tp_size=self.moe.moe_parallel_config.tp_size,
-                        ep_rank=self.moe.moe_parallel_config.ep_rank,
-                        ep_size=self.moe.moe_parallel_config.ep_size,
                     ),
                 )
             else:
                 self.use_inplace = True
                 self.kernel = mk.FusedMoEModularKernel(
                     MoEPrepareAndFinalizeNoEP(),
-                    TritonExperts(self.moe_quant_config),
+                    TritonExperts(
+                        moe_config=self.moe_quant_config,
+                        quant_config=self.moe_quant_config,
+                    ),
                     shared_experts=None,
                 )
 

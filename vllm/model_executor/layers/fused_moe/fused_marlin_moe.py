@@ -8,7 +8,11 @@ import torch
 
 import vllm._custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
+)
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     batched_moe_align_block_size,
     moe_align_block_size,
@@ -22,6 +26,12 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_make_workspace_new,
     marlin_moe_intermediate_size,
     marlin_quant_input,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kFp8Static128BlockSym,
+    kFp8StaticChannelSym,
+    kNvfp4Static,
 )
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
@@ -530,6 +540,7 @@ def batched_fused_marlin_moe(
 class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(
         self,
+        moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
         w13_g_idx: torch.Tensor | None = None,
         w2_g_idx: torch.Tensor | None = None,
@@ -549,7 +560,38 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
         self.w13_g_idx_sort_indices = w13_g_idx_sort_indices
         self.w2_g_idx_sort_indices = w2_g_idx_sort_indices
         self.is_k_full = is_k_full
-        super().__init__(quant_config)
+        super().__init__(moe_config, quant_config)
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        p = current_platform
+        return p.is_cuda() and p.has_device_capability((7, 5))
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return False
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        # TODO(rob): add int4, mxfp4, int8 as integrations
+        # are migrated to use the oracle one-by-one.
+        SUPPORTED_W = [
+            kFp8Static128BlockSym,
+            kFp8StaticChannelSym,
+            kNvfp4Static,
+        ]
+        return weight_key in SUPPORTED_W
+
+    @staticmethod
+    def _supports_activation(activation: str) -> bool:
+        return activation in ["silu", "swigluoai"]
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        return True
 
     @property
     def quant_type_id(self) -> int:
@@ -595,38 +637,15 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
 
 
 class MarlinExperts(MarlinExpertsBase):
-    def __init__(
-        self,
-        quant_config: FusedMoEQuantConfig,
-        w13_g_idx: torch.Tensor | None = None,
-        w2_g_idx: torch.Tensor | None = None,
-        w13_g_idx_sort_indices: torch.Tensor | None = None,
-        w2_g_idx_sort_indices: torch.Tensor | None = None,
-        is_k_full: bool = True,
-    ):
-        super().__init__(
-            quant_config,
-            w13_g_idx,
-            w2_g_idx,
-            w13_g_idx_sort_indices,
-            w2_g_idx_sort_indices,
-            is_k_full,
-        )
-
     def supports_expert_map(self) -> bool:
         return True
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
 
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.Standard,
-            mk.FusedMoEActivationFormat.Standard,
-        )
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
 
     def supports_chunking(self) -> bool:
         return True
@@ -720,42 +739,15 @@ class MarlinExperts(MarlinExpertsBase):
 
 
 class BatchedMarlinExperts(MarlinExpertsBase):
-    def __init__(
-        self,
-        max_num_tokens: int,
-        num_dispatchers: int,
-        quant_config: FusedMoEQuantConfig,
-        w13_g_idx: torch.Tensor | None = None,
-        w2_g_idx: torch.Tensor | None = None,
-        w13_g_idx_sort_indices: torch.Tensor | None = None,
-        w2_g_idx_sort_indices: torch.Tensor | None = None,
-        is_k_full: bool = True,
-    ):
-        super().__init__(
-            quant_config,
-            w13_g_idx,
-            w2_g_idx,
-            w13_g_idx_sort_indices,
-            w2_g_idx_sort_indices,
-            is_k_full,
-        )
-        self.max_num_tokens = max_num_tokens
-        self.num_dispatchers = num_dispatchers
-
     def supports_expert_map(self) -> bool:
         return True
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceDelegate()
 
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.BatchedExperts,
-            mk.FusedMoEActivationFormat.BatchedExperts,
-        )
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.BatchedExperts
 
     def supports_chunking(self) -> bool:
         return False

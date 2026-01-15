@@ -16,18 +16,11 @@ class FallbackExperts(mk.FusedMoEPermuteExpertsUnpermute, ABC):
         experts: mk.FusedMoEPermuteExpertsUnpermute,
         fallback_experts: mk.FusedMoEPermuteExpertsUnpermute,
     ):
-        super().__init__(experts.quant_config)
+        super().__init__(
+            moe_config=experts.moe_config, quant_config=experts.quant_config
+        )
         self.fallback_experts = fallback_experts
         self.experts = experts
-
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        assert (
-            self.fallback_experts.activation_formats == self.experts.activation_formats
-        )
-        return self.fallback_experts.activation_formats
 
     def supports_chunking(self) -> bool:
         assert (

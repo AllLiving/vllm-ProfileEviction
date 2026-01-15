@@ -161,15 +161,15 @@ class Config:
 
     def is_batched_prepare_finalize(self):
         info = prepare_finalize_info(self.prepare_finalize_type)
-        return mk.FusedMoEActivationFormat.BatchedExperts == info.activation_format
+        return mk.FusedMoEActivationFormat.BatchedExperts == info.activation_format()
 
     def is_batched_fused_experts(self):
         info = expert_info(self.fused_experts_type)
-        return mk.FusedMoEActivationFormat.BatchedExperts == info.activation_format
+        return mk.FusedMoEActivationFormat.BatchedExperts == info.activation_format()
 
     def is_standard_fused_experts(self):
         info = expert_info(self.fused_experts_type)
-        return mk.FusedMoEActivationFormat.Standard == info.activation_format
+        return mk.FusedMoEActivationFormat.Standard == info.activation_format()
 
     def fe_supported_types(self):
         info = expert_info(self.fused_experts_type)
@@ -574,10 +574,13 @@ def make_modular_kernel(
         num_experts=config.E,
         experts_per_token=config.topk,
         hidden_dim=config.K,
+        intermediate_size_per_partition=config.N,
         num_local_experts=config.num_local_experts,
         moe_parallel_config=moe_parallel_config,
         in_dtype=config.dtype,
         max_num_tokens=next_power_of_2(config.M),
+        activation="silu",
+        device=vllm_config.device_config.device,
     )
 
     # make modular kernel

@@ -21,6 +21,8 @@ from vllm.model_executor.layers.batch_invariant import (
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     _get_config_dtype_str,
 )
@@ -49,6 +51,14 @@ from vllm.model_executor.layers.fused_moe.utils import (
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import dequant_mxfp4
 from vllm.model_executor.layers.quantization.utils.mxfp6_utils import dequant_mxfp6
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_Scheme
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kFp8Dynamic128Sym,
+    kFp8DynamicTokenSym,
+    kFp8Static128BlockSym,
+    kFp8StaticChannelSym,
+    kFp8StaticTensorSym,
+)
 from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -2299,18 +2309,51 @@ def fused_experts_impl(
 class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(
         self,
+        moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
     ):
-        super().__init__(quant_config)
+        super().__init__(moe_config, quant_config)
 
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.Standard,
-            mk.FusedMoEActivationFormat.Standard,
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        return current_platform.is_cuda_alike()
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return False
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        p = current_platform
+        device_supports_fp8 = p.is_rocm() or (
+            p.is_cuda() and p.has_device_capability((9, 0))
         )
+
+        if not device_supports_fp8:
+            return (weight_key, activation_key) == (None, None)
+
+        SUPPORTED_W_A = [
+            (kFp8Static128BlockSym, kFp8Dynamic128Sym),
+            (kFp8StaticChannelSym, kFp8DynamicTokenSym),
+            (kFp8StaticTensorSym, kFp8DynamicTokenSym),
+            (kFp8StaticTensorSym, kFp8StaticTensorSym),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
+
+    @staticmethod
+    def _supports_activation(activation: str) -> bool:
+        return activation in ["silu", "gelu", "swigluoai"]
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        return True
 
     def supports_chunking(self) -> bool:
         return True
@@ -2486,11 +2529,12 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
 
 class TritonWNA16Experts(TritonExperts):
-    def __init__(
-        self,
-        quant_config: FusedMoEQuantConfig,
-    ):
-        super().__init__(quant_config)
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return False
 
     def apply(
         self,
@@ -2629,10 +2673,12 @@ class TritonWNA16Experts(TritonExperts):
 
 
 def modular_triton_fused_moe(
-    quant_config: FusedMoEQuantConfig, shared_experts: torch.nn.Module | None = None
+    moe_config: FusedMoEConfig,
+    quant_config: FusedMoEQuantConfig,
+    shared_experts: torch.nn.Module | None = None,
 ) -> mk.FusedMoEModularKernel:
     return mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(),
-        TritonExperts(quant_config),
+        TritonExperts(moe_config, quant_config),
         shared_experts,
     )
