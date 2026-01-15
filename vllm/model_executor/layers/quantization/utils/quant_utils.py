@@ -48,6 +48,7 @@ class GroupShape(_GroupShape):
     # Aliases for common quantization group shapes
     PER_TENSOR: ClassVar["GroupShape"]
     PER_TOKEN: ClassVar["GroupShape"]
+    PER_CHANNEL: ClassVar["GroupShape"]
 
     def is_per_tensor(self) -> bool:
         return self.row == -1 and self.col == -1
@@ -55,12 +56,16 @@ class GroupShape(_GroupShape):
     def is_per_token(self) -> bool:
         return self.row == 1 and self.col == -1
 
+    def is_per_channel(self) -> bool:
+        return self.row == -1 and self.col == 1
+
     def is_per_group(self) -> bool:
         return self.row == 1 and self.col >= 1
 
 
 GroupShape.PER_TENSOR = GroupShape(-1, -1)
 GroupShape.PER_TOKEN = GroupShape(1, -1)
+GroupShape.PER_CHANNEL = GroupShape(-1, 1)
 
 
 @dataclass(frozen=True)
@@ -77,15 +82,14 @@ class ScaleDesc:
     group_shape: GroupShape
 
     def __str__(self):
-        group_shape = (
-            "per_tensor"
-            if self.group_shape == GroupShape.PER_TENSOR
-            else (
-                "per_token"
-                if self.group_shape == GroupShape.PER_TOKEN
-                else str(self.group_shape)
-            )
-        )
+        if self.group_shape == GroupShape.PER_TENSOR:
+            group_shape = "per_tensor"
+        elif self.group_shape == GroupShape.PER_TOKEN:
+            group_shape = "per_token"
+        elif self.group_shape == GroupShape.PER_CHANNEL:
+            group_shape = "per_channel"
+        else:
+            group_shape = str(self.group_shape)
 
         return (
             f"{fx.graph.dtype_abbrs[self.dtype]},"
@@ -174,6 +178,43 @@ def group_broadcast(t, shape):
     return t
 
 
+def prep_scale_for_group_broadcast(
+    scale: torch.Tensor,
+    x: torch.Tensor,
+    group_shape: GroupShape | None,
+) -> torch.Tensor:
+    """
+    Prepare the input quantization scale for group broadcasting.
+
+    Args:
+        scale: The scale tensor (scalar or 1D).
+        x: Target tensor whose shape determines broadcast dimensions.
+        group_shape: GroupShape to broadcast over.
+
+    Returns:
+        scale reshaped for correct broadcasting.
+    """
+    if scale.ndim == 0 or scale.numel() == 1:
+        # Scalar scale, expand to (1, 1)
+        return scale.view(1, 1)
+    if scale.ndim == 1:
+        assert group_shape is not None, (
+            "group_shape must be provided to correctly broadcast 1D scale"
+        )
+        rows, cols = _normalize_quant_group_shape(x, group_shape)
+        # Determine broadcasting dimension: either rows or columns match group size
+        if rows == x.shape[-2]:
+            scale = scale.unsqueeze(-2)
+        elif cols == x.shape[-1]:
+            scale = scale.unsqueeze(-1)
+        else:
+            raise ValueError(
+                f"1D scale with shape {scale.shape} cannot be broadcast to x with shape"
+                f" {x.shape}, group_shape={(rows, cols)}"
+            )
+    return scale
+
+
 # Quantize assuming once scale per group of elements with shape group_shape,
 # example group shapes:
 #  * (-1, -1)   for per-tensor quantization
@@ -223,7 +264,7 @@ def scaled_quantize(
     amax = torch.maximum(min_val.abs(), max_val.abs()).clamp(min=1e-12)
     scale = finfo.max / amax
 
-    # Apply scale and convert form:
+    # Apply scale and convert from:
     # (BLK_M, BLK_N, BLOCK_SIZE_M * BLOCK_SIZE_N) to (M, N)
     x_scl_sat = (
         (x_blkd_permd * scale.unsqueeze(-1))
@@ -243,29 +284,7 @@ def scaled_dequantize(
     group_shape: GroupShape | None = None,
     out_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
-    if group_shape is not None:
-        group_shape = _normalize_quant_group_shape(x_q, group_shape)
-
-    if x_s.ndim == 0:  # scalar
-        x_s = x_s.unsqueeze(-1).unsqueeze(-1)  # convert to (1, 1) tensor
-    if x_s.ndim == 1:
-        if group_shape is None:
-            raise AssertionError(
-                "if x_s is 1D tensor, group_shape must be provided otherwise "
-                "its ambiguous which dimension to broadcast x_s to"
-            )
-        # unsqueeze the scales for the dimension where we want to broadcast
-        # across the full extent
-        if group_shape[0] == x_q.shape[-2]:
-            x_s = x_s.unsqueeze(-2)
-        elif group_shape[1] == x_q.shape[-1]:
-            x_s = x_s.unsqueeze(-1)
-        else:
-            raise AssertionError(
-                "if x_s is a vector we should be broadcasting it to the full "
-                "extent of one of the dimensions"
-            )
-
+    x_s = prep_scale_for_group_broadcast(x_s, x_q, group_shape)
     if group_shape is not None:
         assert x_s.shape[-1] == x_q.shape[-1] // group_shape[1]
         assert x_s.shape[-2] == x_q.shape[-2] // group_shape[0]
@@ -299,6 +318,9 @@ def get_and_maybe_dequant_weights(
     if (
         isinstance(layer.quant_method, Fp8LinearMethod)
         and not layer.quant_method.use_marlin
+        # DeepGEMM transforms the scales using `transform_sf_into_required_layout` into
+        # a layout that is not compatible with `scaled_dequantize`.
+        and not layer.quant_method.use_deep_gemm
     ):
         weight_scales = get_attribute_fallback(
             layer, ["weight_scale", "weight_scale_inv"]
