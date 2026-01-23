@@ -933,8 +933,20 @@ class ModelConfig:
 @dataclass
 class PagedEvictConfig:
     def compute_hash(self) -> str:
+        """
+        计算 PagedEviction 配置的唯一指纹。
+        当 metric 或 budget 变更时，必须生成新的 hash 以触发重编译/重置。
+        """
         factors: List[Any] = []
+        # 将核心驱逐参数加入指纹
+        factors.append(self.disable_evict_prefill)
+        factors.append(self.cache_prune_type)
+        factors.append(self.evict_method)
+        factors.append(self.cache_budget)
+        factors.append(self.topk_blocks)
+        # 生成 Hash 字符串供上层 CacheConfig 调用
         hash_str = hashlib.md5(str(factors).encode()).hexdigest()
+        return hash_str
         
     def __init__(self,
                  disable_evict_prefill: bool,
@@ -1023,6 +1035,10 @@ class CacheConfig:
         factors: List[Any] = []
         factors.append(self.cache_dtype)
         # `cpu_offload_gb` does not use `torch.compile` yet.
+        # 将 PagedEvictConfig 的 Hash 混入 CacheConfig 的 Hash,
+        # For changing global VllmConfig
+        if self.paged_evict_config is not None:
+            factors.append(self.paged_evict_config.compute_hash())
         hash_str = hashlib.md5(str(factors).encode()).hexdigest()
         return hash_str
 
