@@ -203,3 +203,7 @@ benchmarks/*.json
 # Linting
 actionlint
 shellcheck*/
+
+# else
+models
+cedar*
