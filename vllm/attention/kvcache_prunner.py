@@ -4,14 +4,16 @@ import math
 import time
 
 class KVCachePruner:
-    def __init__(self, cache_prune_type, evict_method, block_size, cache_budget, initial_blocks):
+    def __init__(self, cache_prune_type, evict_method, block_size, cache_budget, initial_blocks, evict_metric="value_l2"):
         self.cache_prune_type = cache_prune_type
         self.evict_method = evict_method
         self.orig_block_size = block_size
         assert self.cache_prune_type == "budget"
         self.cache_budget = cache_budget
-        self.sub_evict_method = "value_l2"  # for global & local
+        # self.sub_evict_method = "value_l2"  # for global & local
+        self.sub_evict_method = evict_metric
         self.initial_blocks = initial_blocks   # Number of compressed blocks to keep unpruned
+        # print(f"\n[DEBUG] PagedEviction initialized with Metric: {self.sub_evict_method}\n")
         assert self.cache_budget >= 3 * self.orig_block_size, "Cache budget must be at least 3 times the original block size"
         
     def key_l2(self, key_block):
@@ -25,6 +27,10 @@ class KVCachePruner:
     
     def value_l2_plus_key_l2(self, key_block, value_block):
         return self.value_l2(key_block) + self.key_l2(value_block)
+
+    def value_div_key(self, key_block, value_block):
+        # 论文核心公式: ||V||_2 / ||K||_2
+        return self.value_l2(value_block) / (self.key_l2(key_block) + 1e-8)
     
     def get_token_score(self, keys, values, evict_method):
         scores = 0 
@@ -35,6 +41,8 @@ class KVCachePruner:
             elif self.sub_evict_method == "key_l2":
                 # use key_l2 norm for global and local eviction
                 scores = self.key_l2(keys)
+            elif self.sub_evict_method == "paged_ratio":
+                scores = self.value_div_key(keys, values)
             elif self.sub_evict_method == "value_l2_plus_key_l2":
                 # use value_l2 + key_l2 norm for global and local eviction
                 scores = self.value_l2_plus_key_l2(keys, values)

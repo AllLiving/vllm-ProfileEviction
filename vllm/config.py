@@ -942,6 +942,7 @@ class PagedEvictConfig:
         factors.append(self.disable_evict_prefill)
         factors.append(self.cache_prune_type)
         factors.append(self.evict_method)
+        factors.append(self.evict_metric)
         factors.append(self.cache_budget)
         factors.append(self.topk_blocks)
         # 生成 Hash 字符串供上层 CacheConfig 调用
@@ -952,6 +953,7 @@ class PagedEvictConfig:
                  disable_evict_prefill: bool,
                  cache_prune_type: str, 
                  evict_method: str,
+                 evict_metric: str,
                 #  decode_evict_method: str,
                 #  evict_size: int,
                 #  evict_freq: int,
@@ -962,6 +964,7 @@ class PagedEvictConfig:
         self.disable_evict_prefill = disable_evict_prefill
         self.cache_prune_type = cache_prune_type
         self.evict_method = evict_method
+        self.evict_metric = evict_metric
         # self.decode_evict_method = decode_evict_method
         # self.evict_size = evict_size
         # self.evict_freq = evict_freq

@@ -784,7 +784,8 @@ class TorchCUDASDPABackendImpl(AttentionImpl[TorchCUDASDPAMetadata]):
                                 self.paged_evict_config.evict_method,
                                 self.cache_config.block_size, 
                                 self.paged_evict_config.cache_budget,           
-                                self.paged_evict_config.initial_blocks
+                                self.paged_evict_config.initial_blocks,
+                                self.paged_evict_config.evict_metric
                                 ) 
             self.block_l2norm_mgr = BlockL2NormManager()
             self.stream_manager = CudaStreamManager.get_instance(f"cuda:{torch.cuda.current_device()}")
