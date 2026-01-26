@@ -204,6 +204,7 @@ class EngineArgs:
     disable_evict_prefill: Optional[bool] = False
     cache_prune_type: Optional[str] = "budget"
     evict_method: Optional[str] = "streamingLLM"
+    evict_metric: Optional[str] = "value_l2"
     # evict_size: Optional[int] = 8
     # evict_freq: Optional[int] = 2
     cache_budget: Optional[int] = 1024
@@ -1000,6 +1001,15 @@ class EngineArgs:
             help='The paged eviction method to use.'
         )
 
+        # [vllm/engine/arg_utils.py] -> add_cli_args 方法内
+        parser.add_argument(
+            '--evict-metric',
+            type=str,
+            choices=['value_l2', 'key_l2', 'paged_ratio'],
+            default='value_l2',
+            help='Metric to calculate importance (e.g., value_l2, paged_ratio). Only used when evict-method is global/local.'
+        )
+
         # parser.add_argument(
         #     '--evict-freq',
         #     type=int,
@@ -1135,6 +1145,7 @@ class EngineArgs:
                 disable_evict_prefill=self.disable_evict_prefill,
                 cache_prune_type=self.cache_prune_type,
                 evict_method=self.evict_method,
+                evict_metric=self.evict_metric,
                 # evict_freq=self.evict_freq,
                 cache_budget=self.cache_budget,
                 # initial_blocks=self.initial_blocks,
