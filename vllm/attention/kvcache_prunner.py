@@ -31,7 +31,27 @@ class KVCachePruner:
     def value_div_key(self, key_block, value_block):
         # 论文核心公式: ||V||_2 / ||K||_2
         return self.value_l2(value_block) / (self.key_l2(key_block) + 1e-8)
-    
+    # [Task 1: Helper Function - Hoyer Sparsity]
+    def compute_hoyer_sparsity(self, token_tensor):
+        """
+        Compute Hoyer Sparsity (Hoyer, 2004) for tokens.
+        Measure of sparsity: 0 (dense) to 1 (sparse).
+        Formula: (sqrt(d) - L1/L2) / (sqrt(d) - 1)
+        Input: [..., head_dim]
+        Output: [...]
+        """
+        # token_tensor: [batch, seq, num_heads, head_dim] or [N, num_heads, head_dim]
+        d = token_tensor.shape[-1]
+        sqrt_d = math.sqrt(d)
+
+        # Calculate L1 and L2 norms along the feature dimension
+        l1_norm = torch.norm(token_tensor, p=1, dim=-1)
+        l2_norm = torch.norm(token_tensor, p=2, dim=-1)
+
+        # Avoid division by zero with epsilon
+        sparsity = (sqrt_d - (l1_norm / (l2_norm + 1e-8))) / (sqrt_d - 1)
+        return sparsity
+
     def get_token_score(self, keys, values, evict_method):
         scores = 0 
         if evict_method in ['global', 'local']:
@@ -49,6 +69,9 @@ class KVCachePruner:
             elif self.sub_evict_method == "inverse_key_l2":
                 # use inverse key_l2 norm for global and local eviction
                 scores = self.inverse_key_l2(keys, values)
+            elif self.sub_evict_method == "profile_richness":
+                # use inverse key_l2 norm for global and local eviction
+                scores = self.compute_hoyer_sparsity(keys)
         elif evict_method == "inverse_key_l2":
             # use inverse key_l2 norm for inverse_key_l2 eviction
             scores = self.inverse_key_l2(keys, values)
@@ -72,7 +95,24 @@ class KVCachePruner:
         elif self.sub_evict_method == "inverse_key_l2":
             key_norms = torch.norm(block_keys, p=2, dim=-1).mean(dim=1).sum(dim=0)
             return 1 / (key_norms + 1e-8)
+        elif self.sub_evict_method == "profile_richness":
+            # Input: block_values [num_tokens, num_heads, head_dim]
+            # 这里的 num_tokens 被视为属于同一个 Block (Scope)
 
+            # Step 1: Meso-level Aggregation (Max Pooling)
+            # 直接在 dim=0 (Token维度) 上取 Max。
+            # 含义：在这个 Block 范围内，每个特征维度的最大激活值是多少？
+            # Output Shape: [num_heads, head_dim]
+            profile_vector = torch.max(block_values, dim=0).values
+
+            # Step 2: Scoring (L2 Norm)
+            # 计算 Profile 向量的模长，代表特征丰富度/能量
+            # Output Shape: [num_heads]
+            head_scores = torch.norm(profile_vector, p=2, dim=-1)
+
+            # Step 3: Aggregate over heads (Mean)
+            # Output Shape: Scalar
+            return head_scores.mean()
 
     def prune_prompt(self, key_tensor, value_tensor):
         # remove tokens for a single request
@@ -421,4 +461,4 @@ if __name__ == "__main__":
     # print("before recent block pruning", keys.shape, values.shape)
     # keys, values = pruner.prune_recent_block(keys, values)
     # print("after recent block pruning", keys.shape, values.shape)
-    
+
