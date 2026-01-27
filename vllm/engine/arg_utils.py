@@ -1005,9 +1005,9 @@ class EngineArgs:
         parser.add_argument(
             '--evict-metric',
             type=str,
-            choices=['value_l2', 'key_l2', 'paged_ratio'],
+            choices=['value_l2', 'key_l2', 'paged_ratio', 'profile_richness'],
             default='value_l2',
-            help='Metric to calculate importance (e.g., value_l2, paged_ratio). Only used when evict-method is global/local.'
+            help='Metric to calculate importance (e.g., value_l2, paged_ratio, profile_richness). Only used when evict-method is global/local.'
         )
 
         # parser.add_argument(
