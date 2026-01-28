@@ -208,7 +208,7 @@ class EngineArgs:
     # evict_size: Optional[int] = 8
     # evict_freq: Optional[int] = 2
     cache_budget: Optional[int] = 1024
-    # initial_blocks: Optional[int] = 1
+    initial_blocks: Optional[int] = 1
     # num_blocks_merge: Optional[int] = 2
     topk_blocks: Optional[int] = 3 # for local, use 3; for global, use -1
 
@@ -1024,12 +1024,12 @@ class EngineArgs:
             help='The number of tokens to keep in the KV cache for each request after pruning'
         )
         
-        # parser.add_argument(
-        #     '--initial-blocks',
-        #     type=int,
-        #     default=EngineArgs.initial_blocks,
-        #     help='The number of initial blocks to keep unprunned'
-        # )
+        parser.add_argument(
+            '--initial-blocks',
+            type=int,
+            default=EngineArgs.initial_blocks,
+            help='The number of initial blocks to keep unprunned'
+        )
         
         # parser.add_argument(
         #     '--num-blocks-merge',
@@ -1148,7 +1148,7 @@ class EngineArgs:
                 evict_metric=self.evict_metric,
                 # evict_freq=self.evict_freq,
                 cache_budget=self.cache_budget,
-                # initial_blocks=self.initial_blocks,
+                initial_blocks=self.initial_blocks,
                 # num_block_merge=self.num_blocks_merge,
                 topk_blocks=self.topk_blocks
             )
