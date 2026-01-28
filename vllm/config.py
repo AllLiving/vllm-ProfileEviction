@@ -943,6 +943,7 @@ class PagedEvictConfig:
         factors.append(self.cache_prune_type)
         factors.append(self.evict_method)
         factors.append(self.evict_metric)
+        factors.append(self.initial_blocks)
         factors.append(self.cache_budget)
         factors.append(self.topk_blocks)
         # 生成 Hash 字符串供上层 CacheConfig 调用
@@ -958,7 +959,7 @@ class PagedEvictConfig:
                 #  evict_size: int,
                 #  evict_freq: int,
                  cache_budget: int,
-                #  initial_blocks: int,
+                 initial_blocks: int,
                 #  num_block_merge: int,
                  topk_blocks: int) -> None:
         self.disable_evict_prefill = disable_evict_prefill
@@ -969,11 +970,11 @@ class PagedEvictConfig:
         # self.evict_size = evict_size
         # self.evict_freq = evict_freq
         self.cache_budget = cache_budget
-        # self.initial_blocks = initial_blocks # Number of compressed blocks to keep unprunned
+        self.initial_blocks = initial_blocks # Number of compressed blocks to keep unprunned
         # self.num_block_merge = num_block_merge # Number of blocks to merge when evicting
         # self.original_block_size = 0
         self.topk_blocks = topk_blocks
-        self.initial_blocks = 1  # Number of compressed blocks to keep unpruned
+        # self.initial_blocks = 1  # Number of compressed blocks to keep unpruned
         
         self._verify_args()
         
