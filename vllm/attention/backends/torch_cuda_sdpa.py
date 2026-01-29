@@ -575,19 +575,15 @@ class TorchCUDASDPAMetadataBuilder(
         ### TODO: Update for calculating the slot_mapping
         block_table = block_tables[seq_id]
         if is_prompt:
-            remainder = query_len % block_size
-            if remainder == 0:
-                for block_id in block_table:
-                    block_start_offset = block_id * block_size
-                    slot_mapping.extend([ block_start_offset + i for i in range(0, block_size)])
-            else:
-                for block_id in block_table[:-1]:
-                    block_start_offset = block_id * block_size
-                    slot_mapping.extend([ block_start_offset + i for i in range(0, block_size)])
-                
-                block_start_offset = block_table[-1] * block_size
-                slot_mapping.extend([ block_start_offset + i for i in range(0, remainder)])
-                
+            # 假设 Pruner 输出的 Tensor 长度将严格等于 block_table 能容纳的 Token 数 (即 Budget)。
+            for block_id in block_table[:-1]:
+                block_start_offset = block_id * block_size
+                slot_mapping.extend([block_start_offset + i for i in range(block_size)])
+            # 处理最后一个 Block
+            last_block_id = block_table[-1]
+            last_block_start_offset = last_block_id * block_size
+            # 如果实际 Pruned Tensor 比这就短，会在 _update_kvcache 时被截断，不会越界。
+            slot_mapping.extend([last_block_start_offset + i for i in range(block_size)])
         else:
             # decode request
             assert query_len == 1, "decode request should have query_len=1 when paged_evict is enabled"

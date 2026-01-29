@@ -327,6 +327,7 @@ class KVCachePruner:
             # last_size = q_len - end_idx_middle_slice
             
             # Single concatenation operation (most efficient)
+            # 确保只处理 Tensor，完全不碰 slot_mapping
             combined_key = torch.cat([
                 key_tensor[first_slice, :, :],
                 pruned_middle_key,
@@ -340,8 +341,14 @@ class KVCachePruner:
             ], dim=0)
             
             # print(f"qlen={q_len}, combined_key.shape = {combined_key.shape}, combined_value.shape = {combined_value.shape}, output_key_tensor.shape= {output_key_tensor.shape}, output_value_tensor.shape = {output_value_tensor.shape}") 
-            output_key_tensor.copy_(combined_key)
-            output_value_tensor.copy_(combined_value)
+            # Safety Check for Compact Filling
+            if combined_key.shape[0] != output_key_tensor.shape[0]:
+                min_len = min(combined_key.shape[0], output_key_tensor.shape[0])
+                output_key_tensor[:min_len].copy_(combined_key[:min_len])
+                output_value_tensor[:min_len].copy_(combined_value[:min_len])
+            else:
+                output_key_tensor.copy_(combined_key)
+                output_value_tensor.copy_(combined_value)
         else:
             raise ValueError(f"Unsupported eviction method: {self.evict_method} for cache_prune_type: {self.cache_prune_type}")
     
