@@ -1398,8 +1398,10 @@ class TorchCUDASDPABackendImpl(AttentionImpl[TorchCUDASDPAMetadata]):
                     tmp_slot_mapping.append(slot_id)
                 # upt_block_tables.append(self.block_l2norm_mgr.get_req_block_tables(id))
             else:
-                seqid_to_rmv_block_idx[id] = (target_req_id, 1)
-                idx_to_rmv_block_idx[id] = 1
+                # 驱逐的是 Sink 之后的第一个 Block (即最旧的非 Sink Block)
+                rmv_block_idx = self.paged_evict_config.initial_blocks
+                seqid_to_rmv_block_idx[id] = (target_req_id, rmv_block_idx)
+                idx_to_rmv_block_idx[id] = rmv_block_idx
                 # upt_block_tables.append(self.block_l2norm_mgr.get_updated_block_tables(id, 1))
                 is_pruned_decode = True
 

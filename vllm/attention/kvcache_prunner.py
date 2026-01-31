@@ -124,8 +124,8 @@ class KVCachePruner:
         if self.evict_method in ["streamingLLM", "streamingLLM-1"]:
             # for budget case
             remainder_size = q_len % self.orig_block_size
-            # Only the middle slice will be pruned
-            end_idx_first_slice = self.orig_block_size
+            # Only the middle slice will be pruned, reserve enough blocks
+            end_idx_first_slice = self.initial_blocks * self.orig_block_size
             first_slice = slice(0, end_idx_first_slice)
             
             end_idx_middle_slice = q_len - self.orig_block_size - remainder_size
@@ -139,8 +139,10 @@ class KVCachePruner:
             middle_value = value_tensor[middle_slice, :, :]
             middle_tokens = middle_key.shape[0]
             
-            middle_pruned_tokens = self.cache_budget - self.orig_block_size - self.orig_block_size
-            total_prune_tokens = middle_tokens - middle_pruned_tokens
+            head_len = end_idx_first_slice
+            tail_len = self.orig_block_size
+            middle_allowance = self.cache_budget - head_len - tail_len
+            total_prune_tokens = middle_tokens - middle_allowance
             total_prune_tokens = 0 if total_prune_tokens < 0 else total_prune_tokens
     
             # Middle slice after prunning
