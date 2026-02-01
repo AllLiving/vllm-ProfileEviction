@@ -608,6 +608,21 @@ class TorchCUDASDPAMetadataBuilder(
         for inter_data in self.input_builder.inter_data_list:
             self._add_seq_group(inter_data,
                                 self.input_builder.chunked_prefill_enabled)
+        # 在转换为 Tensor 之前，对 Python List 进行截断
+        if self.paged_evict_config is not None and self.paged_evict_config.cache_prune_type == "budget":
+            max_num_blocks = (self.paged_evict_config.cache_budget + self.block_size) // self.block_size
+            initial_blocks = self.paged_evict_config.initial_blocks
+            # 进行截断
+            for i in range(len(self.block_tables)):
+                current_table = self.block_tables[i]
+                if len(current_table) > max_num_blocks:
+                    tail_blocks = max_num_blocks - initial_blocks
+                    if tail_blocks > 0:
+                        sink_part = current_table[:initial_blocks]
+                        recent_part = current_table[-tail_blocks:]
+                        self.block_tables[i] = sink_part + recent_part
+                    else:
+                        self.block_tables[i] = current_table[:max_num_blocks]
 
         device = self.runner.device
         use_captured_graph = cuda_graph_pad_size != -1
@@ -1047,30 +1062,13 @@ class TorchCUDASDPABackendImpl(AttentionImpl[TorchCUDASDPAMetadata]):
             # 这是为了解决 "Pre-deception" 导致的 Scheduler 分配过多 Block 的问题
             # 即使 Scheduler 分配了 375 个 Block，我们只允许 Kernel 看到前 64 个 (若 Budget=1024, Block=16)
             # 计算允许的最大 Block 数量
-            if self.paged_evict_config.cache_prune_type == "budget":
+            if self.enabled_paged_eviction and self.paged_evict_config.cache_prune_type == "budget":
                 # StreamingLLM accumulates tokens until a full block is formed.
                 # the physical size can temporarily reach Budget + Block_Size.
                 safe_margin = self.cache_config.block_size
                 max_capacity = self.paged_evict_config.cache_budget + safe_margin
-                effective_num_blocks = max_capacity // self.cache_config.block_size
-                # 检查是否需要截断 (维度 1 是 Block 数量)
-                # block_tables_arg shape: [batch_size, max_num_blocks]
-                if block_tables_arg.shape[1] > effective_num_blocks:
-                    # 构造 [Sink (Initial Blocks) + Recent (Tail Blocks)] 的视图
-                    init_blocks = self.paged_evict_config.initial_blocks
-                    tail_blocks = effective_num_blocks - init_blocks
-                    sink_part = block_tables_arg[:, :init_blocks]
-                    history_part = block_tables_arg[:, init_blocks+1 : effective_num_blocks]
-                    newest_part = block_tables_arg[:, -tail_blocks:]
-                    block_tables_arg = torch.cat([sink_part, history_part, newest_part], dim=1)
-                    # if tail_blocks > 0:
-                    #    sink_part = block_tables_arg[:, :init_blocks]
-                    #    tail_part = block_tables_arg[:, -tail_blocks:]
-                    #    block_tables_arg = torch.cat([sink_part, tail_part], dim=1)
-                    # else:
-                    #     block_tables_arg = block_tables_arg[:, :effective_num_blocks]
-                    current_view_size = block_tables_arg.shape[1] * self.cache_config.block_size
-                    max_capacity = current_view_size
+                max_num_blocks = (self.paged_evict_config.cache_budget + self.cache_config.block_size) // self.cache_config.block_size
+                max_capacity = max_num_blocks * self.cache_config.block_size
                 # Seq Len Truncation (逻辑截断 - Critical Fix)
                 # 无论 Scheduler 说了什么，请求实际上只有 budget 这么长。防止 Kernel 循环越界去读不存在的 Block。
                 if seq_lens_arg is not None:
