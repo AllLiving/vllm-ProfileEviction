@@ -15,10 +15,20 @@ Summary of the above text:
 """
 
 def run_test(args):
-    print(f"--- Testing Model: {args.model} ---")
-    print(f"--- Eviction Enabled: {args.enable_paged_eviction} ---")
+    print("\n" + "="*50)
+    print(f"VALIDATION TEST CONFIGURATION")
+    print(f"Model Path:   {args.model}")
+
     if args.enable_paged_eviction:
-        print(f"--- Method: {args.evict_method}, Metric: {args.evict_metric}, Budget: {args.cache_budget} ---")
+        print(f"   Run Mode:     Paged Eviction Enabled")
+        print(f"   Method:       {args.evict_method}")
+        print(f"   Metric:       {args.evict_metric}")
+        print(f"   Cache Budget: {args.cache_budget} tokens")
+        print(f"   Init Blocks:  {args.initial_blocks}")
+    else:
+        print(f"   Run Mode:     Full Cache (Standard vLLM)")
+        print(f"   Note:         Eviction is DISABLED. Running with default memory management.")
+    print("="*50 + "\n")
 
     # 1. 初始化 vLLM
     engine_args = {
@@ -38,7 +48,8 @@ def run_test(args):
             "enable_paged_eviction": True,
             "evict_method": args.evict_method,
             "evict_metric": args.evict_metric,
-            "cache_budget": args.cache_budget
+            "cache_budget": args.cache_budget,
+            "initial_blocks": args.initial_blocks
         })
 
     llm = LLM(**engine_args)
@@ -68,10 +79,11 @@ def run_test(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default="./models/Llama-3.2-1B-Instruct")
-    parser.add_argument("--enable-paged-eviction", action="store_true")
+    parser.add_argument("--model", type=str,
+                        default="/home/cgj/studio/vllm-ProfileEviction/models/Llama-3.2-1B-Instruct",
+                        help="Path to the model weights")
+    parser.add_argument("--enable-paged-eviction", action="store_true", help="Enable KV cache eviction")
     parser.add_argument("--evict-method", type=str, default="global")
-    # parser.add_argument("--evict-metric", type=str, default="paged_ratio")
     parser.add_argument("--evict-metric", type=str, default="value_l2")
     parser.add_argument("--cache-budget", type=int, default=512) # 设小一点，方便测试
     parser.add_argument("--initial-blocks", type=int, default=4)
