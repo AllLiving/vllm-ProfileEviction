@@ -194,7 +194,7 @@ class KVCachePruner:
             # for budget case
             remainder_size = q_len % self.orig_block_size
             # Only the middle slice will be pruned
-            end_idx_first_slice = self.orig_block_size
+            end_idx_first_slice = self.initial_blocks * self.orig_block_size
             first_slice = slice(0, end_idx_first_slice)
             
             end_idx_middle_slice = q_len - self.orig_block_size - remainder_size
@@ -205,8 +205,10 @@ class KVCachePruner:
             # Extract middle tokens and its size
             middle_tokens = end_idx_middle_slice - end_idx_first_slice
             
-            middle_pruned_tokens = self.cache_budget - self.orig_block_size - self.orig_block_size
-            total_prune_tokens = middle_tokens - middle_pruned_tokens
+            head_len = end_idx_first_slice
+            tail_len = self.orig_block_size
+            middle_allowance = self.cache_budget - head_len - tail_len
+            total_prune_tokens = middle_tokens - middle_allowance
             total_prune_tokens = 0 if total_prune_tokens < 0 else total_prune_tokens
     
             # Middle slice after pruning
@@ -303,7 +305,7 @@ class KVCachePruner:
             # Need to prune tokens from middle slice
             remainder_size = seq_len % self.orig_block_size
             # Only the middle slice will be pruned
-            end_idx_first_slice = self.orig_block_size
+            end_idx_first_slice = self.initial_blocks * self.orig_block_size
             num_first_slice_tokens = end_idx_first_slice
 
             end_idx_middle_slice = seq_len - self.orig_block_size - remainder_size
