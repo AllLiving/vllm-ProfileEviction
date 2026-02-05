@@ -1046,6 +1046,18 @@ class TorchCUDASDPABackendImpl(AttentionImpl[TorchCUDASDPAMetadata]):
                 seq_lens_arg = decode_meta.seq_kv_lens_tensor
                 if is_prune_decode and decode_block_tables is not None:
                     block_tables_arg = decode_block_tables
+                # 欺骗 RoPE：强制将 Sequence Length 限制在 Budget 之内
+                if self.paged_evict_config.evict_method in ["streamingLLM", "streamingLLM-1"]:
+                    budget = self.paged_evict_config.cache_budget
+                    block_size = self.cache_config.block_size
+                    # last Physical Block 中的有效 Token 数量 (余数)
+                    active_tokens_in_last_block = ((seq_lens_arg - 1) % block_size) + 1
+                    # 统计每个 Sequence 实际拥有的有效 Physical Blocks 数量
+                    valid_block_counts = (block_tables_arg != 0).sum(dim=1)
+                    # 拼装精准的物理 Token 总数 = (满载块数) * block_size + 尾块 Token 数
+                    physical_seq_lens = torch.clamp((valid_block_counts - 1) * block_size, min=0) + active_tokens_in_last_block
+                    seq_lens_arg = physical_seq_lens.to(seq_lens_arg.dtype)
+                    max_seq_len_arg = physical_seq_lens.max().item()
             
             output[attn_metadata.num_prefill_tokens:] = PagedAttention.forward_decode(
                 query[attn_metadata.num_prefill_tokens:],
