@@ -1050,12 +1050,16 @@ class TorchCUDASDPABackendImpl(AttentionImpl[TorchCUDASDPAMetadata]):
                 if self.paged_evict_config.evict_method in ["streamingLLM", "streamingLLM-1"]:
                     budget = self.paged_evict_config.cache_budget
                     block_size = self.cache_config.block_size
-                    # last Physical Block 中的有效 Token 数量 (余数)
+                    # 1. 精确获取当前 Sequence 实际被分配的物理块总数
+                    # 构造 indices 矩阵，通过 max 巧妙避开 0 号块等于 False 的陷阱，并免疫末尾 Padding
+                    indices = torch.arange(block_tables_arg.shape[1], device=block_tables_arg.device).unsqueeze(0)
+                    last_valid_idx = ((block_tables_arg != 0) * indices).max(dim=1)[0]
+                    actual_physical_blocks = last_valid_idx + 1
+                    # 2. 计算物理 Token 总数 = (满载块数 - 1) * block_size + 尾块真实 Token 数
+                    # 尾数忠于逻辑长度余数，确保 RoPE 旋转位置完美对齐
                     active_tokens_in_last_block = ((seq_lens_arg - 1) % block_size) + 1
-                    # 统计每个 Sequence 实际拥有的有效 Physical Blocks 数量
-                    valid_block_counts = (block_tables_arg != 0).sum(dim=1)
-                    # 拼装精准的物理 Token 总数 = (满载块数) * block_size + 尾块 Token 数
-                    physical_seq_lens = torch.clamp((valid_block_counts - 1) * block_size, min=0) + active_tokens_in_last_block
+                    physical_seq_lens = (actual_physical_blocks - 1) * block_size + active_tokens_in_last_block
+                    # 3. 替换传入底层 Kernel 的参数
                     seq_lens_arg = physical_seq_lens.to(seq_lens_arg.dtype)
                     max_seq_len_arg = physical_seq_lens.max().item()
             
@@ -1557,6 +1561,7 @@ class TorchCUDASDPABackendImpl(AttentionImpl[TorchCUDASDPAMetadata]):
                 
                 seqid_to_rmv_block_idx[id] = (target_req_id, rmv_idx)
                 idx_to_rmv_block_idx[id] = rmv_idx 
+                l2_norms.pop(rmv_idx)
 
                 # upt_block_tables.append(self.block_l2norm_mgr.get_updated_block_tables(id, rmv_idx, is_rmv_l2norm=True))
                 # print(f"layer_idx = {self.layer_idx} raw block tables type: {type(attn_metadata.decode_metadata.block_tables)}, shape={attn_metadata.decode_metadata.block_tables.shape} raw block tables: {attn_metadata.decode_metadata.block_tables[id]}, updated block tables: {upt_block_tables[id]}")
@@ -1575,31 +1580,16 @@ class TorchCUDASDPABackendImpl(AttentionImpl[TorchCUDASDPAMetadata]):
         return updated_block_tables, seqid_to_rmv_block_idx, is_pruned_decode
     
     def _create_updated_block_tables(self, original_tables, idx_to_rmv_block_idx):
-        # This function is used to create the updated block tables for the streamingLLM case
-        batch_size, max_blocks = original_tables.shape
-        device = original_tables.device
-        
-        # clone the original tables, we cannot modify the original tables
-        # because it will be used in the next decode layer
+        # 1. 完全克隆原始映射表，保留完整的 [batch_size, max_blocks] 形状,avoid 切掉未驱逐序列的最新物理块
         updated_tables = original_tables.clone()
-        max_new_length = max_blocks - 1  # Get the sequence IDs from the first column
-        for idx in range(batch_size):
-            origin_blocks = updated_tables[idx]
-            if idx in idx_to_rmv_block_idx:
-                rmv_block_idx = idx_to_rmv_block_idx[idx]
-                # Remove the block at rmv_block_idx and shift the rest left
-                new_blocks = torch.cat([origin_blocks[:rmv_block_idx], origin_blocks[rmv_block_idx+1:]])
-            else:
-                # No block to remove, keep the original blocks
-                new_blocks = origin_blocks[:max_new_length]
-            
-            # write the new blocks to the updated tables
-            updated_tables[idx, :len(new_blocks)] = new_blocks
-            updated_tables = updated_tables[:,:max_new_length]  # Ensure the shape is consistent
-        
-        # print(f"+++++create_updated_block_tables: original_tables.shape={original_tables.shape}, updated_tables.shape={updated_tables.shape}, max_new_length={max_new_length}")    
+        # 2. 仅针对当前 step 确实触发了物理驱逐的 Request 进行处理
+        for idx, rmv_block_idx in idx_to_rmv_block_idx.items():
+            # 将被驱逐块（rmv_block_idx）之后的所有物理块 ID 整体左移一位
+            updated_tables[idx, rmv_block_idx:-1] = updated_tables[idx, rmv_block_idx+1:].clone()
+            # 将空出来的最后一个 Slot 置为 0 (vLLM 默认的 Padding ID)
+            # Kernel 的读取边界由 seq_lens_arg 严格控制，绝不会读到这个 Padding
+            updated_tables[idx, -1] = 0
         return updated_tables
-
 
 def _make_alibi_bias(
     alibi_slopes: torch.Tensor,
