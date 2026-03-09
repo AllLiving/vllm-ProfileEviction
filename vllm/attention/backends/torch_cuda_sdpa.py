@@ -800,7 +800,7 @@ class TorchCUDASDPABackendImpl(AttentionImpl[TorchCUDASDPAMetadata]):
         
         # just for test case
         # for local and global, if enable_random_evict is enabled, it will randomly evict a block instead of compare the l2_norms.
-        self.enable_random_evict = True
+        self.enable_random_evict = False
 
         # max_num_seqs = 256 # TODO: change it to use the configuration parameter from scheduleConfig
         # self.cached_keys = torch.zeros((num_update_tokens, self.num_kv_heads, self.head_size),
