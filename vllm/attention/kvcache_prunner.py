@@ -126,7 +126,7 @@ class KVCachePruner:
         elif self.evict_method in ["local", "global", "inverse_key_l2"]:
             # always keep the first block and the last block
             remainder_size = q_len % self.orig_block_size
-            end_idx_first_slice = self.orig_block_size
+            end_idx_first_slice = self.orig_block_size * self.initial_blocks
             first_slice = slice(0, end_idx_first_slice)
             
             end_idx_middle_slice = q_len - self.orig_block_size - remainder_size
@@ -139,8 +139,8 @@ class KVCachePruner:
             middle_key = key_tensor[middle_slice, :, :]
             middle_value = value_tensor[middle_slice, :, :]
             middle_tokens = middle_key.shape[0]
-            
-            middle_pruned_tokens = self.cache_budget - self.orig_block_size - self.orig_block_size
+            # 修改点：将硬编码的 orig_block_size 替换为受 initial_blocks 控制的 end_idx_first_slice
+            middle_pruned_tokens = self.cache_budget - end_idx_first_slice - self.orig_block_size
             total_prune_tokens = middle_tokens - middle_pruned_tokens 
             total_prune_tokens = 0 if total_prune_tokens < 0 else total_prune_tokens
                 
@@ -231,7 +231,7 @@ class KVCachePruner:
 
         elif self.evict_method in ["local", "global", "inverse_key_l2"]:
             remainder_size = q_len % self.orig_block_size
-            end_idx_first_slice = self.orig_block_size
+            end_idx_first_slice = self.orig_block_size * self.initial_blocks
             first_slice = slice(0, end_idx_first_slice)
             
             end_idx_middle_slice = q_len - self.orig_block_size - remainder_size
@@ -243,8 +243,8 @@ class KVCachePruner:
             middle_key = key_tensor[middle_slice, :, :]
             middle_value = value_tensor[middle_slice, :, :]
             middle_tokens = middle_key.shape[0]
-                
-            middle_pruned_tokens = self.cache_budget - self.orig_block_size - self.orig_block_size
+            # 修改点：将硬编码的 orig_block_size 替换为受 initial_blocks 控制的 end_idx_first_slice
+            middle_pruned_tokens = self.cache_budget - end_idx_first_slice - self.orig_block_size
             total_prune_tokens = middle_tokens - middle_pruned_tokens 
             total_prune_tokens = 0 if total_prune_tokens < 0 else total_prune_tokens
 
@@ -323,7 +323,7 @@ class KVCachePruner:
             # Need to prune tokens from middle slice
             remainder_size = seq_len % self.orig_block_size
             # Only the middle slice will be pruned
-            end_idx_first_slice = self.orig_block_size
+            end_idx_first_slice = self.orig_block_size * self.initial_blocks
             num_first_slice_tokens = end_idx_first_slice
             end_idx_middle_slice = seq_len - self.orig_block_size - remainder_size
             num_middle_tokens = end_idx_middle_slice - end_idx_first_slice

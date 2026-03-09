@@ -1521,11 +1521,11 @@ class TorchCUDASDPABackendImpl(AttentionImpl[TorchCUDASDPAMetadata]):
                 # randomly select a block id to be removed
                 block_ids = attn_metadata.reqid_mapping_blocktables[target_req_id][int(target_seq_id)]
                 if self.paged_evict_config.evict_method == "local":
-                    blk_start = 1
+                    blk_start = self.paged_evict_config.initial_blocks
                     blk_end = blk_start + self.paged_evict_config.topk_blocks
                 else:
                     # The global case
-                    blk_start = 1
+                    blk_start = self.paged_evict_config.initial_blocks
                     blk_end = len(block_ids) - 1
 
                 rmv_idx = random.randint(blk_start, blk_end - 1) # Exclude the last block
@@ -1544,11 +1544,11 @@ class TorchCUDASDPABackendImpl(AttentionImpl[TorchCUDASDPAMetadata]):
                 l2_norms = self.block_l2norm_mgr.update_last_block_l2norm(id, l2_norm)
                 # get the removed block idx
                 if self.paged_evict_config.evict_method == "local":
-                    blk_start = 1
+                    blk_start = self.paged_evict_config.initial_blocks
                     blk_end = blk_start + self.paged_evict_config.topk_blocks
                 else:
                     ### The global case
-                    blk_start = 1
+                    blk_start = self.paged_evict_config.initial_blocks
                     blk_end = len(l2_norms) - 1 # not include the last block
                     # get the idx that has the minimal l2-norm
                 rmv_idx = blk_start
