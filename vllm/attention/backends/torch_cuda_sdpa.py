@@ -1047,7 +1047,7 @@ class TorchCUDASDPABackendImpl(AttentionImpl[TorchCUDASDPAMetadata]):
                 if is_prune_decode and decode_block_tables is not None:
                     block_tables_arg = decode_block_tables
                 # 欺骗 RoPE：强制将 Sequence Length 限制在 Budget 之内
-                if self.paged_evict_config.evict_method in ["streamingLLM", "streamingLLM-1"]:
+                if self.paged_evict_config.evict_method in ["streamingLLM", "streamingLLM-1", "global"]:
                     budget = self.paged_evict_config.cache_budget
                     block_size = self.cache_config.block_size
                     # 1. 精确获取当前 Sequence 实际被分配的物理块总数
@@ -1062,7 +1062,6 @@ class TorchCUDASDPABackendImpl(AttentionImpl[TorchCUDASDPAMetadata]):
                     # 3. 替换传入底层 Kernel 的参数
                     seq_lens_arg = physical_seq_lens.to(seq_lens_arg.dtype)
                     max_seq_len_arg = physical_seq_lens.max().item()
-            
             output[attn_metadata.num_prefill_tokens:] = PagedAttention.forward_decode(
                 query[attn_metadata.num_prefill_tokens:],
                 key_cache,
