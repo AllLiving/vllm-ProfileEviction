@@ -95,6 +95,10 @@ class KVCachePruner:
         elif self.sub_evict_method == "inverse_key_l2":
             key_norms = torch.norm(block_keys, p=2, dim=-1).mean(dim=1).sum(dim=0)
             return 1 / (key_norms + 1e-8)
+        elif self.sub_evict_method == "paged_ratio":
+            value_norms = torch.norm(block_values, p=2, dim=-1).mean(dim=1).sum(dim=0)
+            key_norms = torch.norm(block_keys, p=2, dim=-1).mean(dim=1).sum(dim=0)
+            return value_norms / (key_norms + 1e-8)
         elif self.sub_evict_method == "profile_richness":
             # Input: block_values [num_tokens, num_heads, head_dim]
             # 这里的 num_tokens 被视为属于同一个 Block (Scope)
