@@ -72,6 +72,9 @@ class KVCachePruner:
             elif self.sub_evict_method == "profile_richness":
                 # use inverse key_l2 norm for global and local eviction
                 scores = self.compute_hoyer_sparsity(keys)
+                # scores = self.inverse_key_l2(keys, values)
+                l1_norm = torch.norm(keys, p=1, dim=-1)
+                scores = 1.0 / (l1_norm + 1e-8)
         elif evict_method == "inverse_key_l2":
             # use inverse key_l2 norm for inverse_key_l2 eviction
             scores = self.inverse_key_l2(keys, values)
@@ -107,16 +110,16 @@ class KVCachePruner:
             # 直接在 dim=0 (Token维度) 上取 Max。
             # 含义：在这个 Block 范围内，每个特征维度的最大激活值是多少？
             # Output Shape: [num_heads, head_dim]
-            profile_vector = torch.max(block_values, dim=0).values
+            profile_vector = torch.max(torch.abs(block_values), dim=0).values
 
             # Step 2: Scoring (L2 Norm)
             # 计算 Profile 向量的模长，代表特征丰富度/能量
             # Output Shape: [num_heads]
-            head_scores = torch.norm(profile_vector, p=2, dim=-1)
+            profile_norm = torch.norm(profile_vector, p=2, dim=-1)
 
             # Step 3: Aggregate over heads (Mean)
             # Output Shape: Scalar
-            return head_scores.mean()
+            return profile_norm.mean().item()
 
     def prune_prompt(self, key_tensor, value_tensor):
         # remove tokens for a single request
