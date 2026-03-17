@@ -99,9 +99,13 @@ class KVCachePruner:
             key_norms = torch.norm(block_keys, p=2, dim=-1).mean(dim=1).sum(dim=0)
             return 1 / (key_norms + 1e-8)
         elif self.sub_evict_method == "paged_ratio":
-            value_norms = torch.norm(block_values, p=2, dim=-1).mean(dim=1).sum(dim=0)
-            key_norms = torch.norm(block_keys, p=2, dim=-1).mean(dim=1).sum(dim=0)
-            return value_norms / (key_norms + 1e-8)
+            # 避免使用 .mean().sum() 的链式调用，直接使用 linalg.vector_norm
+            # value_norms = torch.norm(block_values, p=2, dim=-1).mean(dim=1).sum(dim=0)
+            v_norm = torch.linalg.vector_norm(block_values, ord=2, dim=-1).mean(dim=1).sum()
+            # key_norms = torch.norm(block_keys, p=2, dim=-1).mean(dim=1).sum(dim=0)
+            k_norm = torch.linalg.vector_norm(block_keys, ord=2, dim=-1).mean(dim=1).sum()
+            # return value_norms / (key_norms + 1e-8)
+            return (v_norm / (k_norm + 1e-8)).item()
         elif self.sub_evict_method == "profile_richness":
             # Input: block_values [num_tokens, num_heads, head_dim]
             # 这里的 num_tokens 被视为属于同一个 Block (Scope)
@@ -111,11 +115,14 @@ class KVCachePruner:
             # 含义：在这个 Block 范围内，每个特征维度的最大激活值是多少？
             # Output Shape: [num_heads, head_dim]
             profile_vector = torch.max(torch.abs(block_values), dim=0).values
+            # 放弃融合算子优化，经验数据是唯一真理 (Empirical data is king)
+            # profile_vector = torch.amax(block_values.abs(), dim=0)
 
             # Step 2: Scoring (L2 Norm)
             # 计算 Profile 向量的模长，代表特征丰富度/能量
             # Output Shape: [num_heads]
             profile_norm = torch.norm(profile_vector, p=2, dim=-1)
+            # profile_norm = torch.linalg.vector_norm(profile_vector, ord=2, dim=-1)
 
             # Step 3: Aggregate over heads (Mean)
             # Output Shape: Scalar
