@@ -1549,7 +1549,16 @@ class TorchCUDASDPABackendImpl(AttentionImpl[TorchCUDASDPAMetadata]):
                 else:
                     ### The global case
                     blk_start = self.paged_evict_config.initial_blocks
-                    blk_end = len(l2_norms) - 1 # not include the last block
+                    # 获取该序列当前绝对真实的物理块数组
+                    target_req_id, target_seq_id = self.block_l2norm_mgr.get_reqid_and_seqid(id)
+                    block_ids = attn_metadata.reqid_mapping_blocktables[target_req_id][int(target_seq_id)]
+                    # 强制物理约束：真实物理块总数减 1 (必须保留当前正在接收 Token 的尾块 Active Block)
+                    max_physical_safe_end = len(block_ids) - 1
+                    # blk_end = len(l2_norms) - 1 # not include the last block
+                    blk_end = min(len(l2_norms) - 1, max_physical_safe_end)
+                    if blk_start >= blk_end:
+                        is_pruned_decode = False
+                        continue
                     # get the idx that has the minimal l2-norm
                 rmv_idx = blk_start
                 min_l2_norm = l2_norms[rmv_idx]
