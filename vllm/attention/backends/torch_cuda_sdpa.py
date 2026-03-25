@@ -1552,10 +1552,16 @@ class TorchCUDASDPABackendImpl(AttentionImpl[TorchCUDASDPAMetadata]):
                     # 获取该序列当前绝对真实的物理块数组
                     target_req_id, target_seq_id = self.block_l2norm_mgr.get_reqid_and_seqid(id)
                     block_ids = attn_metadata.reqid_mapping_blocktables[target_req_id][int(target_seq_id)]
-                    # 强制物理约束：真实物理块总数减 1 (必须保留当前正在接收 Token 的尾块 Active Block)
-                    max_physical_safe_end = len(block_ids) - 1
+                    # 动态保护区：强制保留 Budget 尾部 25% 的 Block
+                    total_budget_blocks = self.paged_evict_config.cache_budget // self.cache_config.block_size
+                    protected_tail_blocks = max(1, total_budget_blocks // 4)
+                    # 物理安全边界：真实物理块总数 - 1 (当前活跃块) - 保护的尾部块
+                    max_physical_safe_end = len(block_ids) - 1 - protected_tail_blocks
+                    # 逻辑安全边界：分数表长度 - 保护的尾部块
+                    max_logical_safe_end = len(l2_norms) - protected_tail_blocks
                     # blk_end = len(l2_norms) - 1 # not include the last block
                     blk_end = min(len(l2_norms) - 1, max_physical_safe_end)
+                    blk_end = min(max_physical_safe_end, max_logical_safe_end)
                     if blk_start >= blk_end:
                         is_pruned_decode = False
                         continue
