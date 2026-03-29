@@ -97,7 +97,7 @@ class KVCachePruner:
             return value_norms + key_norms
         elif self.sub_evict_method == "inverse_key_l2":
             key_norms = torch.norm(block_keys, p=2, dim=-1).mean(dim=1).sum(dim=0)
-            return 1 / (key_norms + 1e-8)
+            return (1 / (key_norms + 1e-8)).item()
         elif self.sub_evict_method == "paged_ratio":
             # 避免使用 .mean().sum() 的链式调用，直接使用 linalg.vector_norm
             # value_norms = torch.norm(block_values, p=2, dim=-1).mean(dim=1).sum(dim=0)
