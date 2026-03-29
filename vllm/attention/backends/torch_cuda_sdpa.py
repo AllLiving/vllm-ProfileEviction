@@ -1572,10 +1572,15 @@ class TorchCUDASDPABackendImpl(AttentionImpl[TorchCUDASDPAMetadata]):
                     if l2_norms[idx] < l2_norms[rmv_idx]:
                         rmv_idx = idx
                         min_l2_norm = l2_norms[idx]
-                
+                import os
+                probe_log_path = "/home/cgj/studio/vLLM-PagedEviction/test0326/paged_evict_decode_probe.log"
+                with open(probe_log_path, "a") as f:
+                    f.write(f"\nBlock remove BEFORE: {l2_norms}\n")
                 seqid_to_rmv_block_idx[id] = (target_req_id, rmv_idx)
                 idx_to_rmv_block_idx[id] = rmv_idx 
                 l2_norms.pop(rmv_idx)
+                with open(probe_log_path, "a") as f:
+                    f.write(f"rmv_idx={rmv_idx}, \nBlock remove AFTER: {l2_norms}\n")
 
                 # upt_block_tables.append(self.block_l2norm_mgr.get_updated_block_tables(id, rmv_idx, is_rmv_l2norm=True))
                 # print(f"layer_idx = {self.layer_idx} raw block tables type: {type(attn_metadata.decode_metadata.block_tables)}, shape={attn_metadata.decode_metadata.block_tables.shape} raw block tables: {attn_metadata.decode_metadata.block_tables[id]}, updated block tables: {upt_block_tables[id]}")
@@ -1590,7 +1595,23 @@ class TorchCUDASDPABackendImpl(AttentionImpl[TorchCUDASDPAMetadata]):
             #     )
             updated_block_tables = self._create_updated_block_tables(
                 attn_metadata.decode_metadata.block_tables, idx_to_rmv_block_idx) 
-         
+            # ==================== [Decode 探针注入 0326] ====================
+            import os
+            probe_log_path = "/home/cgj/studio/vLLM-PagedEviction/test0326/paged_evict_decode_probe.log"
+            with open(probe_log_path, "a") as f:
+                for id, seq_len in enumerate(attn_metadata.seq_lens):
+                    if id in idx_to_rmv_block_idx:
+                        target_req_id, target_seq_id = self.block_l2norm_mgr.get_reqid_and_seqid(id)
+                        raw_table = attn_metadata.decode_metadata.block_tables[id].tolist()
+                        new_table = updated_block_tables[id].tolist()
+                        rmv_logical_idx = idx_to_rmv_block_idx[id]
+                        f.write(f"========== Step Trigger ==========\n")
+                        f.write(f"ReqID: {target_req_id}, SeqLen: {seq_len}, Budget: {self.paged_evict_config.cache_budget}\n")
+                        f.write(f"Evict Metric: {self.paged_evict_config.evict_metric}\n")
+                        f.write(f"Action: Evicted Logical Index [{rmv_logical_idx}]\n")
+                        f.write(f"Block Table BEFORE: {raw_table}\n")
+                        f.write(f"Block Table AFTER : {new_table}\n")
+                        f.write(f"----------------------------------\n")
         return updated_block_tables, seqid_to_rmv_block_idx, is_pruned_decode
     
     def _create_updated_block_tables(self, original_tables, idx_to_rmv_block_idx):
