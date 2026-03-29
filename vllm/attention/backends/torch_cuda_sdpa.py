@@ -1554,7 +1554,7 @@ class TorchCUDASDPABackendImpl(AttentionImpl[TorchCUDASDPAMetadata]):
                     block_ids = attn_metadata.reqid_mapping_blocktables[target_req_id][int(target_seq_id)]
                     # 动态保护区：强制保留 Budget 尾部 25% 的 Block
                     total_budget_blocks = self.paged_evict_config.cache_budget // self.cache_config.block_size
-                    protected_tail_blocks = max(1, total_budget_blocks // 4)
+                    protected_tail_blocks = 4
                     # 物理安全边界：真实物理块总数 - 1 (当前活跃块) - 保护的尾部块
                     max_physical_safe_end = len(block_ids) - 1 - protected_tail_blocks
                     # 逻辑安全边界：分数表长度 - 保护的尾部块
