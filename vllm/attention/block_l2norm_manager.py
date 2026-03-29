@@ -41,23 +41,23 @@ class BlockL2NormManager:
                     self.reqid_mapping_block_l2norms[req_id] = {}
                 for seq_id, block_table in block_tables.items():
                     if seq_id not in self.reqid_mapping_block_l2norms[req_id]:
-                        self.reqid_mapping_block_l2norms[req_id][seq_id] = [0.0] * len(block_table)
+                        self.reqid_mapping_block_l2norms[req_id][seq_id] = [float('inf')] * len(block_table)
             
             # print(f"update_reqs: reqid_mapping_blocktables={reqid_mapping_blocktables.keys()}, self.reqid_mapping_blocktables={self.reqid_mapping_blocktables.keys()}")
             # print(f"update_reqs: reqid_mapping_block_l2norms={self.reqid_mapping_block_l2norms.keys()}")
             # Remove old requests
-            removed_reqs = [req_id for req_id in self.reqid_mapping_block_l2norms.keys() if req_id not in reqid_mapping_blocktables]
+            # removed_reqs = [req_id for req_id in self.reqid_mapping_block_l2norms.keys() if req_id not in reqid_mapping_blocktables]
             # print(f"to be removed reqs: {removed_reqs}")
-            for req_id in removed_reqs:
-                del self.reqid_mapping_block_l2norms[req_id]
-                del self.reqid_mapping_seqs[req_id]
+            # for req_id in removed_reqs:
+            #     del self.reqid_mapping_block_l2norms[req_id]
+            #     del self.reqid_mapping_seqs[req_id]
             # print(f"update_reqs - after: reqid_mapping_seqs={self.reqid_mapping_seqs.keys()}")
                     
         if is_reqs_changed:
             ### reset the flat_sequence_map based on the updated reqid_mapping_seqs
             self.flat_sequence_map = []
-            for req_id, seq_ids in self.reqid_mapping_seqs.items():
-                for seq_id in seq_ids:
+            for req_id, block_tables in reqid_mapping_blocktables.items():
+                for seq_id in block_tables.keys():
                     self.flat_sequence_map.append((req_id, seq_id))
             # print(f"update_reqs - flat_sequence_map: {self.flat_sequence_map}")
 
