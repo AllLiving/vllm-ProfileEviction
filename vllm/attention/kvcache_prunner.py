@@ -152,13 +152,13 @@ class KVCachePruner:
             middle_key = key_tensor[middle_slice, :, :]
             middle_value = value_tensor[middle_slice, :, :]
             middle_tokens = middle_key.shape[0]
-            
+
             head_len = end_idx_first_slice
             tail_len = self.orig_block_size
             middle_allowance = self.cache_budget - head_len - tail_len
             total_prune_tokens = middle_tokens - middle_allowance
             total_prune_tokens = 0 if total_prune_tokens < 0 else total_prune_tokens
-    
+
             # Middle slice after prunning
             middle_slice = slice(end_idx_first_slice + total_prune_tokens, end_idx_middle_slice) 
         
@@ -250,24 +250,24 @@ class KVCachePruner:
             # Only the middle slice will be pruned
             end_idx_first_slice = self.initial_blocks * self.orig_block_size
             first_slice = slice(0, end_idx_first_slice)
-            
+
             end_idx_middle_slice = q_len - self.orig_block_size - remainder_size
             middle_slice = slice(end_idx_first_slice, end_idx_middle_slice)
-            
+
             last_slice = slice(end_idx_middle_slice, q_len)
             
             # Extract middle tokens and its size
             middle_tokens = end_idx_middle_slice - end_idx_first_slice
-            
+
             head_len = end_idx_first_slice
             tail_len = self.orig_block_size
             middle_allowance = self.cache_budget - head_len - tail_len
             total_prune_tokens = middle_tokens - middle_allowance
             total_prune_tokens = 0 if total_prune_tokens < 0 else total_prune_tokens
-    
+
             # Middle slice after pruning
             middle_slice = slice(end_idx_first_slice + total_prune_tokens, end_idx_middle_slice) 
-    
+
             # Write directly to output tensors
             combined_key = torch.cat([
                 key_tensor[first_slice, :, :],
@@ -284,86 +284,41 @@ class KVCachePruner:
             output_value_tensor.copy_(combined_value)
 
         elif self.evict_method in ["local", "global", "inverse_key_l2", "paged_ratio", "profile_richness"]:
+            # for budget case
             remainder_size = q_len % self.orig_block_size
-            # 物理保护区：由 initial_blocks 决定，而非硬编码的 orig_block_size
-            protected_len = self.initial_blocks * self.orig_block_size
-            end_idx_first_slice = protected_len
+            # Only the middle slice will be pruned
+            end_idx_first_slice = self.initial_blocks * self.orig_block_size
             first_slice = slice(0, end_idx_first_slice)
-            # 切片：尾部 (严格与 get_pruned_length 保持一致)
-            budget_blocks = self.cache_budget // self.orig_block_size
-            protected_tail_blocks = max(1, budget_blocks // 4)
-            tail_protect_len = protected_tail_blocks * self.orig_block_size + remainder_size
-            # 切片：中间段
-            end_idx_middle_slice = max(end_idx_first_slice, q_len - tail_protect_len)
+
+            end_idx_middle_slice = q_len - self.orig_block_size - remainder_size
             middle_slice = slice(end_idx_first_slice, end_idx_middle_slice)
+
             last_slice = slice(end_idx_middle_slice, q_len)
             
-            # Extract middle tokens
-            middle_key = key_tensor[middle_slice, :, :]
-            middle_value = value_tensor[middle_slice, :, :]
-            middle_tokens = middle_key.shape[0]
-            # 减去实际的保护区长度 Budget = Protected_Head + Middle_Survivor + Protected_Tail 
-            middle_allowance = self.cache_budget - end_idx_first_slice - (protected_tail_blocks * self.orig_block_size)
-            middle_allowance = max(0, middle_allowance)
-            middle_pruned_tokens = self.cache_budget - protected_len - self.orig_block_size
-            total_prune_tokens = middle_tokens - middle_pruned_tokens 
+            # Extract middle tokens and its size
+            middle_tokens = end_idx_middle_slice - end_idx_first_slice
+            
+            head_len = end_idx_first_slice
+            tail_len = self.orig_block_size
+            middle_allowance = self.cache_budget - head_len - tail_len
             total_prune_tokens = middle_tokens - middle_allowance
             total_prune_tokens = 0 if total_prune_tokens < 0 else total_prune_tokens
+    
+            # Middle slice after pruning
+            middle_slice = slice(end_idx_first_slice + total_prune_tokens, end_idx_middle_slice) 
 
-            if total_prune_tokens > 0:
-                # Get scores for middle tokens
-                # raw_scores Shape: [Seq_Len, Num_Heads]
-                raw_scores = self.get_token_score(middle_key, middle_value, self.evict_method)
-                # 聚合Headscore for Token一致性, when value_l2，求和代表在所有 Head 上的总能量
-                scores = raw_scores.sum(dim=1)
-
-                # Evict least N elements, select the indices along dim=0
-                _, least_indices = torch.topk(scores, k=total_prune_tokens, largest=False, dim=0)
-
-                # Create a mask for pruning
-                # 初始化为 True (保留)，将 least_indices 设为 False (驱逐)
-                mask = torch.ones(middle_tokens, dtype=torch.bool, device=middle_key.device)
-                mask[least_indices] = False
-
-                # Get pruned middle tensors
-                pruned_middle_key = middle_key[mask, :, :]
-                pruned_middle_value = middle_value[mask, :, :]
-                # print(f"total_prune_tokens={total_prune_tokens} middle_keys={middle_tokens} pruned_middle_key.shape = {pruned_middle_key.shape}, middle_key.shape = {middle_key.shape}")
-
-                # [Assertion Check]
-                assert mask.dim() == 1, \
-                        f"Head Sync Failed: Mask should be 1D [Seq], but got {mask.shape}"
-                # check seq size
-                expected_survivors = middle_tokens - total_prune_tokens
-                assert pruned_middle_key.shape[0] == expected_survivors, \
-                        f"Pruning Count Mismatch: Expected {expected_survivors}, Got {pruned_middle_key.shape[0]}"
-                # check num_heads
-                assert pruned_middle_key.shape[1] == num_heads, \
-                        f"Head Dimension Corrupted: Expected {num_heads}, Got {pruned_middle_key.shape[1]}"
-            else:
-                # No pruning needed, keep the entire middle slice
-                pruned_middle_key = middle_key
-                pruned_middle_value = middle_value
-            
-            # # Calculate sizes
-            # first_size = self.orig_block_size
-            # pruned_middle_size = pruned_middle_key.shape[0]
-            # last_size = q_len - end_idx_middle_slice
-            
-            # Single concatenation operation (most efficient)
+            # Write directly to output tensors
             combined_key = torch.cat([
                 key_tensor[first_slice, :, :],
-                pruned_middle_key,
+                key_tensor[middle_slice, :, :],
                 key_tensor[last_slice, :, :]
             ], dim=0)
-            
             combined_value = torch.cat([
                 value_tensor[first_slice, :, :],
-                pruned_middle_value,
+                value_tensor[middle_slice, :, :],
                 value_tensor[last_slice, :, :]
             ], dim=0)
             
-            # print(f"qlen={q_len}, combined_key.shape = {combined_key.shape}, combined_value.shape = {combined_value.shape}, output_key_tensor.shape= {output_key_tensor.shape}, output_value_tensor.shape = {output_value_tensor.shape}") 
             output_key_tensor.copy_(combined_key)
             output_value_tensor.copy_(combined_value)
         else:
@@ -400,22 +355,17 @@ class KVCachePruner:
             # Need to prune tokens from middle slice
             remainder_size = seq_len % self.orig_block_size
             # Only the middle slice will be pruned
-            protected_len = self.initial_blocks * self.orig_block_size
-            end_idx_first_slice = protected_len
+            end_idx_first_slice = self.initial_blocks * self.orig_block_size
             num_first_slice_tokens = end_idx_first_slice
-            # 动态保护区：尾部 25% + 当前未满的 Remainder
-            budget_blocks = self.cache_budget // self.orig_block_size
-            protected_tail_blocks = max(1, budget_blocks // 4)
-            tail_protect_len = protected_tail_blocks * self.orig_block_size + remainder_size
+
             end_idx_middle_slice = seq_len - self.orig_block_size - remainder_size
-            # num_middle_tokens = end_idx_middle_slice - end_idx_first_slice
+            num_middle_tokens = end_idx_middle_slice - end_idx_first_slice
             num_last_slice_tokens = seq_len - end_idx_middle_slice
-            middle_allowance = self.cache_budget - num_first_slice_tokens - (protected_tail_blocks * self.orig_block_size)
-            middle_allowance = max(0, middle_allowance)
+
             middle_unpruned_tokens = self.cache_budget - num_first_slice_tokens - self.orig_block_size
+
             middle_unpruned_tokens = max(middle_unpruned_tokens, 0)
             total_unpruned_tokens = num_first_slice_tokens + middle_unpruned_tokens + num_last_slice_tokens
-            total_unpruned_tokens = num_first_slice_tokens + middle_allowance + tail_protect_len
 
             return total_unpruned_tokens
         else:
