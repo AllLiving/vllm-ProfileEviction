@@ -292,10 +292,13 @@ class KVCachePruner:
             protected_len = self.initial_blocks * self.orig_block_size
             end_idx_first_slice = protected_len
             first_slice = slice(0, end_idx_first_slice)
-            
-            end_idx_middle_slice = q_len - self.orig_block_size - remainder_size
+            # 切片：尾部 (严格与 get_pruned_length 保持一致)
+            budget_blocks = self.cache_budget // self.orig_block_size
+            protected_tail_blocks = max(1, budget_blocks // 4)
+            tail_protect_len = protected_tail_blocks * self.orig_block_size + remainder_size
+            # 切片：中间段
+            end_idx_middle_slice = max(end_idx_first_slice, q_len - tail_protect_len)
             middle_slice = slice(end_idx_first_slice, end_idx_middle_slice)
-
             last_slice = slice(end_idx_middle_slice, q_len)
             
             # Extract middle tokens
@@ -303,8 +306,11 @@ class KVCachePruner:
             middle_value = value_tensor[middle_slice, :, :]
             middle_tokens = middle_key.shape[0]
             # 减去实际的保护区长度 Budget = Protected_Head + Middle_Survivor + Protected_Tail 
+            middle_allowance = self.cache_budget - end_idx_first_slice - (protected_tail_blocks * self.orig_block_size)
+            middle_allowance = max(0, middle_allowance)
             middle_pruned_tokens = self.cache_budget - protected_len - self.orig_block_size
             total_prune_tokens = middle_tokens - middle_pruned_tokens 
+            total_prune_tokens = middle_tokens - middle_allowance
             total_prune_tokens = 0 if total_prune_tokens < 0 else total_prune_tokens
 
             if total_prune_tokens > 0:
@@ -400,13 +406,19 @@ class KVCachePruner:
             protected_len = self.initial_blocks * self.orig_block_size
             end_idx_first_slice = protected_len
             num_first_slice_tokens = end_idx_first_slice
+            # 动态保护区：尾部 25% + 当前未满的 Remainder
+            budget_blocks = self.cache_budget // self.orig_block_size
+            protected_tail_blocks = max(1, budget_blocks // 4)
+            tail_protect_len = protected_tail_blocks * self.orig_block_size + remainder_size
             end_idx_middle_slice = seq_len - self.orig_block_size - remainder_size
             # num_middle_tokens = end_idx_middle_slice - end_idx_first_slice
             num_last_slice_tokens = seq_len - end_idx_middle_slice
-            
+            middle_allowance = self.cache_budget - num_first_slice_tokens - (protected_tail_blocks * self.orig_block_size)
+            middle_allowance = max(0, middle_allowance)
             middle_unpruned_tokens = self.cache_budget - num_first_slice_tokens - self.orig_block_size
             middle_unpruned_tokens = max(middle_unpruned_tokens, 0)
             total_unpruned_tokens = num_first_slice_tokens + middle_unpruned_tokens + num_last_slice_tokens
+            total_unpruned_tokens = num_first_slice_tokens + middle_allowance + tail_protect_len
 
             return total_unpruned_tokens
         else:
