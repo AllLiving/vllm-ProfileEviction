@@ -96,16 +96,19 @@ class KVCachePruner:
             key_norms = torch.norm(block_keys, p=2, dim=-1).mean(dim=1).sum(dim=0)
             return value_norms + key_norms
         elif self.sub_evict_method == "inverse_key_l2":
-            key_norms = torch.norm(block_keys, p=2, dim=-1).mean(dim=1).sum(dim=0)
-            return (1 / (key_norms + 1e-8)).item()
+            # 遵循先个体后聚合的泛化原则
+            k_norm = torch.linalg.vector_norm(block_keys, ord=2, dim=-1)
+            inverse_k = 1.0 / (k_norm + 1e-8)
+            # 先对 heads 求平均/求和(对齐Token打分)，再对 seq 求平均
+            return inverse_k.sum(dim=1).mean(dim=0).item()
         elif self.sub_evict_method == "paged_ratio":
-            # 避免使用 .mean().sum() 的链式调用，直接使用 linalg.vector_norm
-            # value_norms = torch.norm(block_values, p=2, dim=-1).mean(dim=1).sum(dim=0)
-            v_norm = torch.linalg.vector_norm(block_values, ord=2, dim=-1).mean(dim=1).sum()
-            # key_norms = torch.norm(block_keys, p=2, dim=-1).mean(dim=1).sum(dim=0)
-            k_norm = torch.linalg.vector_norm(block_keys, ord=2, dim=-1).mean(dim=1).sum()
-            # return value_norms / (key_norms + 1e-8)
-            return (v_norm / (k_norm + 1e-8)).item()
+            # 单个 Token & Head 的 Norm
+            v_norm = torch.linalg.vector_norm(block_values, ord=2, dim=-1) # shape: [seq_len_in_block, num_heads]
+            k_norm = torch.linalg.vector_norm(block_keys, ord=2, dim=-1)
+            # 每个 Token 的 Ratio (先相除)
+            ratio = v_norm / (k_norm + 1e-8)
+            # 对 heads 进行聚合 (对齐 Token 打分的 sum 逻辑)，然后对 block 内的 tokens (dim=0) 求平均
+            return ratio.sum(dim=1).mean(dim=0).item()
         elif self.sub_evict_method == "profile_richness":
             # Input: block_values [num_tokens, num_heads, head_dim]
             # 这里的 num_tokens 被视为属于同一个 Block (Scope)
