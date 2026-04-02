@@ -126,7 +126,8 @@ class KVCachePruner:
 
             # Step 3: Aggregate over heads (Mean)
             # Output Shape: Scalar
-            return profile_norm.mean().item()
+            key_norms = torch.norm(block_keys, p=2, dim=-1).mean(dim=1).sum(dim=0)
+            return (1 / (key_norms + 1e-8)).item()
 
     def prune_prompt(self, key_tensor, value_tensor):
         # remove tokens for a single request
