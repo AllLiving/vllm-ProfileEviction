@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 import math 
 import time
+import os
 
 class KVCachePruner:
     def __init__(self, cache_prune_type, evict_method, block_size, cache_budget, initial_blocks, evict_metric="value_l2"):
@@ -52,6 +53,52 @@ class KVCachePruner:
         sparsity = (sqrt_d - (l1_norm / (l2_norm + 1e-8))) / (sqrt_d - 1)
         return sparsity
 
+    def _profile_sparsity_v1(self, keys, values):
+        k_l1_norm = torch.norm(keys, p=1, dim=-1)
+        k_l2_norm = torch.norm(keys, p=2, dim=-1)
+        v_l1_norm = torch.norm(values, p=1, dim=-1)
+        v_l2_norm = torch.norm(values, p=2, dim=-1)
+        devoto_score = 1.0 / (k_l2_norm + 1e-8)
+        seq_len = keys.shape[0]
+        if seq_len < self.cache_budget:
+            scores = devoto_score
+        else:
+            gamma = 0.4
+            alpha = 0.3
+            rescue_ratio = 0.04
+            k_sparsity = k_l2_norm / (k_l1_norm + 1e-8)
+            v_sparsity = v_l2_norm / (v_l1_norm + 1e-8)
+            hoper = alpha * k_sparsity + (1 - alpha) * v_sparsity
+            hoper = torch.maximum(alpha * k_sparsity, v_sparsity)
+            # hoper = (k_sparsity ** gamma) * (v_sparsity ** (1 - gamma))
+            # 只有能量大于中位数的 Token 才有资格申请免死金牌
+            quantile_ratio = 0.4
+            devoto_mean = devoto_score.mean(dim=0, keepdim=True) * 0.85
+            # k_l2_median = torch.median(k_l2_norm, dim=0, keepdim=True).values
+            k_l2_median = torch.kthvalue(k_l2_norm, max(1, int(seq_len * quantile_ratio)), dim=0, keepdim=True).values
+            valid_mask = devoto_score < devoto_mean
+            valid_mask = k_l2_norm < k_l2_median
+            indicator = hoper * valid_mask.float()
+            # 级联设计：提取极性最强的前 15% Token 进行全局豁免
+            rescue_budget_tokens = int(self.cache_budget * rescue_ratio)
+            sparsity_kth = max(1, seq_len - rescue_budget_tokens)
+            if sparsity_kth < seq_len:
+                threshold = torch.kthvalue(indicator, sparsity_kth, dim=0, keepdim=True).values
+                is_highly_sparse = (indicator >= threshold) & (indicator > 0)
+                max_devoto = devoto_score.max(dim=0, keepdim=True).values
+                scores = devoto_score + (is_highly_sparse.float() * max_devoto * 2.0)
+            else:
+                scores = devoto_score
+        return scores
+
+    def _profile_sparsity_v2(self, keys, values):
+        """版本 v2: 待调参或修改逻辑的预留位置"""
+        pass
+
+    def _profile_sparsity_v3(self, keys, values):
+        """版本 v3: 待调参或修改逻辑的预留位置"""
+        pass
+
     def get_token_score(self, keys, values, evict_method):
         scores = 0 
         if evict_method in ['global', 'local']:
@@ -70,17 +117,49 @@ class KVCachePruner:
                 # use inverse key_l2 norm for global and local eviction
                 scores = self.inverse_key_l2(keys, values)
             elif self.sub_evict_method == "profile_richness":
-                # use inverse key_l2 norm for global and local eviction
-                scores = self.compute_hoyer_sparsity(keys)
-                # scores = self.inverse_key_l2(keys, values)
-                l1_norm = torch.norm(keys, p=1, dim=-1)
-                scores = 1.0 / (l1_norm + 1e-8)
+                profile_sparsity_version = os.environ.get("PROFILE_SPARSITY_VER", "1")
+                if profile_sparsity_version == "1":
+                    scores = self._profile_sparsity_v1(keys, values)
+                elif profile_sparsity_version == "2":
+                    scores = self._profile_sparsity_v2(keys, values)
+                elif profile_sparsity_version == "3":
+                    scores = self._profile_sparsity_v3(keys, values)
+                else:
+                    raise ValueError(f"Unknown PROFILE_VER: {profile_sparsity_version}")
         elif evict_method == "inverse_key_l2":
             # use inverse key_l2 norm for inverse_key_l2 eviction
             scores = self.inverse_key_l2(keys, values)
         else:
             raise ValueError(f"Unknown eviction method: {evict_method}")
         return scores
+
+    def _profile_maxpool_v1(self, block_keys, block_values):
+        """版本 v1: 待调参或修改逻辑的预留位置"""
+        # Step 1: Meso-level Aggregation (Max Pooling)
+        # 直接在 dim=0 (Token维度) 上取 Max。
+        # 含义：在这个 Block 范围内，每个特征维度的最大激活值是多少？
+        # Output Shape: [num_heads, head_dim]
+        profile_vector = torch.max(torch.abs(block_values), dim=0).values
+        # 放弃融合算子优化，经验数据是唯一真理 (Empirical data is king)
+        # profile_vector = torch.amax(block_values.abs(), dim=0)
+
+        # Step 2: Scoring (L2 Norm)
+        # 计算 Profile 向量的模长，代表特征丰富度/能量
+        # Output Shape: [num_heads]
+        profile_norm = torch.norm(profile_vector, p=2, dim=-1)
+        # profile_norm = torch.linalg.vector_norm(profile_vector, ord=2, dim=-1)
+
+        # Step 3: Aggregate over heads (Mean)
+        # Output Shape: Scalar
+        return profile_norm.mean().item()
+
+    def _profile_maxpool_v2(self, block_keys, block_values):
+        """版本 v2: 待调参或修改逻辑的预留位置"""
+        pass
+
+    def _profile_maxpool_v3(self, block_keys, block_values):
+        """版本 v3: 待调参或修改逻辑的预留位置"""
+        pass
 
     def get_block_score(self, block_keys, block_values, evict_method):
         #### only used for global and local eviction
@@ -112,24 +191,16 @@ class KVCachePruner:
         elif self.sub_evict_method == "profile_richness":
             # Input: block_values [num_tokens, num_heads, head_dim]
             # 这里的 num_tokens 被视为属于同一个 Block (Scope)
-
-            # Step 1: Meso-level Aggregation (Max Pooling)
-            # 直接在 dim=0 (Token维度) 上取 Max。
-            # 含义：在这个 Block 范围内，每个特征维度的最大激活值是多少？
-            # Output Shape: [num_heads, head_dim]
-            profile_vector = torch.max(torch.abs(block_values), dim=0).values
-            # 放弃融合算子优化，经验数据是唯一真理 (Empirical data is king)
-            # profile_vector = torch.amax(block_values.abs(), dim=0)
-
-            # Step 2: Scoring (L2 Norm)
-            # 计算 Profile 向量的模长，代表特征丰富度/能量
-            # Output Shape: [num_heads]
-            profile_norm = torch.norm(profile_vector, p=2, dim=-1)
-            # profile_norm = torch.linalg.vector_norm(profile_vector, ord=2, dim=-1)
-
-            # Step 3: Aggregate over heads (Mean)
-            # Output Shape: Scalar
-            return profile_norm.mean().item()
+            profile_maxpool_version = os.environ.get("PROFILE_MAXPOOL_VER", "1")
+            if profile_maxpool_version == "1":
+                scores = self._profile_maxpool_v1(block_keys, block_values)
+            elif profile_maxpool_version == "2":
+                scores = self._profile_maxpool_v2(block_keys, block_values)
+            elif profile_maxpool_version == "3":
+                scores = self._profile_maxpool_v3(block_keys, block_values)
+            else:
+                raise ValueError(f"Unknown PROFILE_VER: {profile_maxpool_version}")
+            return scores
 
     def prune_prompt(self, key_tensor, value_tensor):
         # remove tokens for a single request
