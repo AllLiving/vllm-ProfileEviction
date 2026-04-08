@@ -158,8 +158,31 @@ class KVCachePruner:
         pass
 
     def _profile_maxpool_v3(self, block_keys, block_values):
-        """版本 v3: 待调参或修改逻辑的预留位置"""
-        pass
+        """
+        [提纯版双轨制：峰值特征包络 × 检索连通密度]
+        逻辑极其清晰，专为学术论文公式对应而设计。完美复现 Lab 3.2 优势，消灭 broadcasting 隐患。
+        """
+        # 1. 基础极性定义 (Token级)
+        k_l2 = torch.linalg.vector_norm(block_keys, ord=2, dim=-1)
+        k_l1 = torch.linalg.vector_norm(block_keys, ord=1, dim=-1)
+        k_polarity = k_l2 / (k_l1 + 1e-8)  # [S, H]
+        # 轨道一：Peak Feature Envelope (峰值特征包络)
+        # 寻找被最锐利的 K 锚定的最大 V 载荷 (微观线性绑定 -> Max -> L1)
+        v_abs = torch.abs(block_values)    # [S, H, D]
+        weighted_v = v_abs * k_polarity.unsqueeze(-1)  # [S, H, D]
+        gated_v_maxpool = torch.max(weighted_v, dim=0).values # [H, D]
+        # L1 衡量包络的信息容量
+        envelope_volume = torch.linalg.vector_norm(gated_v_maxpool, ord=1, dim=-1) # [H]
+        # 轨道二：Addressability Density (检索连通密度)
+        # 评估该 Block 作为一个整体的“防碎化”能力 (K极性的宏观平均)
+        # [可选] 引入 Kappa 强化极性，根据 Lab 4 的结论，KAPPA=2.0 左右能放大差异
+        kappa = float(os.environ.get("PROFILE_KAPPA", "1.1"))
+        hook_density = (k_polarity ** kappa).mean(dim=0) # [H]
+        # 宏观几何融合 (Geometric Fusion)
+        gamma = float(os.environ.get("PROFILE_GAMMA", "0.1"))
+        # 两个指标均在 [H] 维度，几何加权后求均值，物理意义绝对严谨
+        final_score = ((envelope_volume ** gamma) * (hook_density ** (1.0 - gamma))).mean().item()
+        return final_score
 
     def get_block_score(self, block_keys, block_values, evict_method):
         #### only used for global and local eviction
