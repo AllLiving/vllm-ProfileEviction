@@ -134,30 +134,6 @@ class KVCachePruner:
         return scores
 
     def _profile_maxpool_v1(self, block_keys, block_values):
-        """版本 v1: 待调参或修改逻辑的预留位置"""
-        # Step 1: Meso-level Aggregation (Max Pooling)
-        # 直接在 dim=0 (Token维度) 上取 Max。
-        # 含义：在这个 Block 范围内，每个特征维度的最大激活值是多少？
-        # Output Shape: [num_heads, head_dim]
-        profile_vector = torch.max(torch.abs(block_values), dim=0).values
-        # 放弃融合算子优化，经验数据是唯一真理 (Empirical data is king)
-        # profile_vector = torch.amax(block_values.abs(), dim=0)
-
-        # Step 2: Scoring (L2 Norm)
-        # 计算 Profile 向量的模长，代表特征丰富度/能量
-        # Output Shape: [num_heads]
-        profile_norm = torch.norm(profile_vector, p=2, dim=-1)
-        # profile_norm = torch.linalg.vector_norm(profile_vector, ord=2, dim=-1)
-
-        # Step 3: Aggregate over heads (Mean)
-        # Output Shape: Scalar
-        return profile_norm.mean().item()
-
-    def _profile_maxpool_v2(self, block_keys, block_values):
-        """版本 v2: 待调参或修改逻辑的预留位置"""
-        pass
-
-    def _profile_maxpool_v3(self, block_keys, block_values):
         """
         [提纯版双轨制：峰值特征包络 × 检索连通密度]
         逻辑极其清晰，专为学术论文公式对应而设计。完美复现 Lab 3.2 优势，消灭 broadcasting 隐患。
@@ -183,6 +159,33 @@ class KVCachePruner:
         # 两个指标均在 [H] 维度，几何加权后求均值，物理意义绝对严谨
         final_score = ((envelope_volume ** gamma) * (hook_density ** (1.0 - gamma))).mean().item()
         return final_score
+
+    def _profile_maxpool_v2(self, block_keys, block_values):
+        """版本 v2: 待调参或修改逻辑的预留位置"""
+        pass
+
+    def _profile_maxpool_v3(self, block_keys, block_values):
+        """版本 v3: 待调参或修改逻辑的预留位置"""
+        pass
+
+    def _profile_maxpool_vRich(self, block_keys, block_values):
+        # Step 1: Meso-level Aggregation (Max Pooling)
+        # 直接在 dim=0 (Token维度) 上取 Max。
+        # 含义：在这个 Block 范围内，每个特征维度的最大激活值是多少？
+        # Output Shape: [num_heads, head_dim]
+        profile_vector = torch.max(torch.abs(block_values), dim=0).values
+        # 放弃融合算子优化，经验数据是唯一真理 (Empirical data is king)
+        # profile_vector = torch.amax(block_values.abs(), dim=0)
+
+        # Step 2: Scoring (L2 Norm)
+        # 计算 Profile 向量的模长，代表特征丰富度/能量
+        # Output Shape: [num_heads]
+        profile_norm = torch.norm(profile_vector, p=2, dim=-1)
+        # profile_norm = torch.linalg.vector_norm(profile_vector, ord=2, dim=-1)
+
+        # Step 3: Aggregate over heads (Mean)
+        # Output Shape: Scalar
+        return profile_norm.mean().item()
 
     def get_block_score(self, block_keys, block_values, evict_method):
         #### only used for global and local eviction
