@@ -54,46 +54,78 @@ class KVCachePruner:
         return sparsity
 
     def _profile_sparsity_v1(self, keys, values):
-        k_l1_norm = torch.norm(keys, p=1, dim=-1)
-        k_l2_norm = torch.norm(keys, p=2, dim=-1)
-        v_l1_norm = torch.norm(values, p=1, dim=-1)
-        v_l2_norm = torch.norm(values, p=2, dim=-1)
-        devoto_score = 1.0 / (k_l2_norm + 1e-8)
+        """
+        [方案：无魔数显式动能门控标准版 (Cobb-Douglas 归一化融合)]
+        依据：依靠序列均值归一化消除 Devoto 奇点引起的“对数方差爆炸”；
+        依靠 1-c 和 c 进行纯净的物理插值，彻底消灭经验魔数。
+        """
         seq_len = keys.shape[0]
-        if seq_len < self.cache_budget:
-            scores = devoto_score
-        else:
-            gamma = 0.4
-            alpha = 0.3
-            rescue_ratio = 0.04
-            k_sparsity = k_l2_norm / (k_l1_norm + 1e-8)
-            v_sparsity = v_l2_norm / (v_l1_norm + 1e-8)
-            hoper = alpha * k_sparsity + (1 - alpha) * v_sparsity
-            hoper = torch.maximum(alpha * k_sparsity, v_sparsity)
-            # hoper = (k_sparsity ** gamma) * (v_sparsity ** (1 - gamma))
-            # 只有能量大于中位数的 Token 才有资格申请免死金牌
-            quantile_ratio = 0.4
-            devoto_mean = devoto_score.mean(dim=0, keepdim=True) * 0.85
-            # k_l2_median = torch.median(k_l2_norm, dim=0, keepdim=True).values
-            k_l2_median = torch.kthvalue(k_l2_norm, max(1, int(seq_len * quantile_ratio)), dim=0, keepdim=True).values
-            valid_mask = devoto_score < devoto_mean
-            valid_mask = k_l2_norm < k_l2_median
-            indicator = hoper * valid_mask.float()
-            # 级联设计：提取极性最强的前 15% Token 进行全局豁免
-            rescue_budget_tokens = int(self.cache_budget * rescue_ratio)
-            sparsity_kth = max(1, seq_len - rescue_budget_tokens)
-            if sparsity_kth < seq_len:
-                threshold = torch.kthvalue(indicator, sparsity_kth, dim=0, keepdim=True).values
-                is_highly_sparse = (indicator >= threshold) & (indicator > 0)
-                max_devoto = devoto_score.max(dim=0, keepdim=True).values
-                scores = devoto_score + (is_highly_sparse.float() * max_devoto * 2.0)
-            else:
-                scores = devoto_score
-        return scores
+        budget = self.cache_budget
+        # c_ratio: 0 代表极度压缩，1 代表无需压缩
+        c_ratio = min(1.0, float(budget) / max(seq_len, 1))
+        # 唯一的外部控制变量 (控制 K 的整体活性基准，建议默认 1.0)
+        beta = float(os.environ.get("PROFILE_KAPPA_TOKEN", "1.0"))
+        # [无魔数相变] 柯布-道格拉斯弹性分配
+        # 极度压缩 (c_ratio -> 0): gamma -> 1, kappa -> 0 (V 完全主导，保事实)
+        # 宽裕预算 (c_ratio -> 0.5): gamma -> 0.5, kappa -> 0.5 * beta (K 强势介入，保逻辑)
+        gamma = 1.0 - c_ratio
+        kappa = c_ratio * beta
+        # ==========================================
+        # V 部分：纯信息体积与归一化
+        # ==========================================
+        v_l1 = torch.linalg.vector_norm(values, ord=1, dim=-1) # [S, H]
+        v_score_raw = v_l1.sum(dim=1) # [S]
+        # [核心修复 1] 均值归一化：将基准拉到 1.0，防止被 K 掩盖
+        v_score = v_score_raw / (v_score_raw.mean(dim=0) + 1e-8)
+        # ==========================================
+        # K 部分：防爆显式路由动能
+        # ==========================================
+        k_l2 = torch.linalg.vector_norm(keys, ord=2, dim=-1) # [S, H]
+        k_hoyer = self.compute_hoyer_sparsity(keys) # [S, H]
+        # [核心修复 2] K_L2 局部归一化 + 物理底座(1e-2)
+        # 彻底防止某些无意义 Token 的 k_l2 接近 0 导致 1/k_l2 变成无穷大从而篡权
+        k_l2_normed = k_l2 / (k_l2.mean(dim=0, keepdim=True) + 1e-8)
+        k_kinetic = (1.0 / (k_l2_normed + 1e-2)) * k_hoyer # [S, H]
+        k_score_raw = k_kinetic.sum(dim=1) # [S]
+        # [核心修复 1] 均值归一化：将基准拉到 1.0，与 V 处于绝对公平的竞技场
+        k_score = k_score_raw / (k_score_raw.mean(dim=0) + 1e-8)
+        # ==========================================
+        # 几何融合：公平的对数凸组合
+        # ==========================================
+        # 由于 v_score 和 k_score 均值都为 1.0，此时 gamma 和 kappa 真正成为了胜负手
+        final_scores = (v_score ** gamma) * (k_score ** kappa)
+        return final_scores.unsqueeze(-1)
 
     def _profile_sparsity_v2(self, keys, values):
-        """版本 v2: 待调参或修改逻辑的预留位置"""
-        pass
+        """
+        [方案：纯净 L1 正交同构]
+        V_L1 代表纯信息容量；1/K_L1 隐式融合了 Devoto 动能与 Hoyer 极性。
+        计算极快，无量纲危机。
+        """
+        seq_len = keys.shape[0]
+        budget = self.cache_budget
+        c_ratio = min(1.0, float(budget) / max(seq_len, 1))
+        # 单一控制超参
+        base_param = float(os.environ.get("PROFILE_KAPPA_TOKEN", "1.0"))
+        # 动态相变：
+        # 因为 1/K_L1 的惩罚比 1/K_L2 更严厉（它天然惩罚不稀疏的词），
+        # 所以这里的 kappa 上限可以比方案稍微温和一点。
+        gamma = base_param * (1.2 - c_ratio)
+        gamma = base_param * (1.0 - c_ratio)
+        kappa = base_param * (0.1 + c_ratio * 1.2)
+        kappa = base_param * c_ratio
+        # V部分：纯信息体积
+        v_l1 = torch.linalg.vector_norm(values, ord=1, dim=-1) # [S, H]
+        v_score = v_l1.sum(dim=1) # [S]
+        v_score = v_score / (v_score.mean(dim=0) + 1e-8)
+        # K部分：隐式路由动能
+        k_l1 = torch.linalg.vector_norm(keys, ord=1, dim=-1) # [S, H]
+        k_kinetic = 1.0 / (k_l1 + 1e-8) # [S, H]
+        k_score = k_kinetic.sum(dim=1) # [S]
+        k_score = k_score / (k_score.mean(dim=0) + 1e-8)
+        # 几何融合
+        final_scores = (v_score ** gamma) * (k_score ** kappa)
+        return final_scores.unsqueeze(-1)
 
     def _profile_sparsity_v3(self, keys, values):
         """版本 v3: 待调参或修改逻辑的预留位置"""
