@@ -1540,9 +1540,16 @@ class TorchCUDASDPABackendImpl(AttentionImpl[TorchCUDASDPAMetadata]):
                 tmp_kvs = kv_cache[:, src_idx, :]
                 tmp_key = tmp_kvs[0].view(-1, self.num_kv_heads, self.head_size)
                 tmp_value = tmp_kvs[1].view(-1, self.num_kv_heads, self.head_size)
-                l2_norm = self.kv_cache_pruner.get_block_score(tmp_key, tmp_value, self.paged_evict_config.evict_method)
+
+                l2_norm, b_hash = self.kv_cache_pruner.get_block_score_with_simhash(
+                    tmp_key, tmp_value, self.paged_evict_config.evict_method)
                 # update the block l2-norm value
                 l2_norms = self.block_l2norm_mgr.update_last_block_l2norm(id, l2_norm)
+                # [ProfileEvict] 登记新块 Hash 并 Count + 1
+                block_hashes = self.block_l2norm_mgr.reqid_mapping_block_hashes[target_req_id][int(target_seq_id)]
+                block_hashes.append(b_hash)
+                self.block_l2norm_mgr.global_hash_freq[b_hash] += 1
+
                 # get the removed block idx
                 if self.paged_evict_config.evict_method == "local":
                     blk_start = self.paged_evict_config.initial_blocks
@@ -1568,16 +1575,30 @@ class TorchCUDASDPABackendImpl(AttentionImpl[TorchCUDASDPAMetadata]):
                         is_pruned_decode = False
                         continue
                     # get the idx that has the minimal l2-norm
+
+                # [ProfileEvict] 动态分数干预寻找 rmv_idx
+                import os
+                # 可调节的惩罚超参 lambda (建议初始设为 1.0 观察效果)
+                penalty_lambda = float(os.environ.get("SIMHASH_PENALTY_LAMBDA", "1.0"))
+
                 rmv_idx = blk_start
                 min_l2_norm = l2_norms[rmv_idx]
+                min_penalized_score = float('inf')
                 for idx in range(blk_start, blk_end):
-                    if l2_norms[idx] < l2_norms[rmv_idx]:
+                    h = block_hashes[idx]
+                    freq = self.block_l2norm_mgr.global_hash_freq[h]
+                    # 核心公式
+                    penalized_score = l2_norms[idx] / (1.0 + penalty_lambda * max(0, freq - 1))
+                    if penalized_score < min_penalized_score:
                         rmv_idx = idx
                         min_l2_norm = l2_norms[idx]
-                
+                        min_penalized_score = penalized_score
                 seqid_to_rmv_block_idx[id] = (target_req_id, rmv_idx)
                 idx_to_rmv_block_idx[id] = rmv_idx 
                 l2_norms.pop(rmv_idx)
+                evicted_hash = block_hashes.pop(rmv_idx)
+                if self.block_l2norm_mgr.global_hash_freq[evicted_hash] > 0:
+                    self.block_l2norm_mgr.global_hash_freq[evicted_hash] -= 1
 
                 # upt_block_tables.append(self.block_l2norm_mgr.get_updated_block_tables(id, rmv_idx, is_rmv_l2norm=True))
                 # print(f"layer_idx = {self.layer_idx} raw block tables type: {type(attn_metadata.decode_metadata.block_tables)}, shape={attn_metadata.decode_metadata.block_tables.shape} raw block tables: {attn_metadata.decode_metadata.block_tables[id]}, updated block tables: {upt_block_tables[id]}")

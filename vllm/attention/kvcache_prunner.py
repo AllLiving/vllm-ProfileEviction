@@ -16,6 +16,8 @@ class KVCachePruner:
         self.initial_blocks = initial_blocks   # Number of compressed blocks to keep unpruned
         # print(f"\n[DEBUG] PagedEviction initialized with Metric: {self.sub_evict_method}\n")
         assert self.cache_budget >= 3 * self.orig_block_size, "Cache budget must be at least 3 times the original block size"
+        # [ProfileEvict] 延迟初始化的全局随机投影矩阵 (用于 64-bit SimHash)
+        self.rp_matrix = None
         
     def key_l2(self, key_block):
         return torch.norm(key_block, p=2, dim = -1)  # mean over the heads
@@ -293,6 +295,41 @@ class KVCachePruner:
             else:
                 raise ValueError(f"Unknown PROFILE_VER: {profile_maxpool_version}")
             return scores
+
+    def get_block_score_with_simhash(self, block_keys, block_values, evict_method):
+        """
+        [Macro Stage] 结合 Meso 阶段的 L2 Score 与 Macro 阶段的 64-bit SimHash
+        返回: (meso_score, simhash_val)
+        """
+        # 1. 复用原有的打分逻辑，获取 Meso Score
+        meso_score = self.get_block_score(block_keys, block_values, evict_method)
+        # 2. 提取 V_profile (Channel-wise Max Pooling)
+        # block_values shape: [num_tokens, num_heads, head_dim]
+        # v_profile shape: [num_heads, head_dim]
+        v_profile = torch.max(torch.abs(block_values), dim=0).values
+        # 3. 展平拼接 (Flatten) 适配 GQA/MHA
+        # flattened_v shape: [num_heads * head_dim]
+        flattened_v = v_profile.flatten()
+        # 4. 延迟初始化投影矩阵 (Lazy Initialization)
+        if self.rp_matrix is None:
+            feature_dim = flattened_v.shape[0]
+            # 固定随机种子，确保多卡 Tensor Parallel 时投影矩阵严格一致
+            gen = torch.Generator(device=block_values.device)
+            gen.manual_seed(42)
+            # self.rp_matrix = torch.randn(feature_dim, 64, device=block_values.device, dtype=block_values.dtype, generator=gen)
+            self.rp_matrix = torch.randn(feature_dim, 63, device=block_values.device, dtype=block_values.dtype, generator=gen)
+            self.powers_of_two = (2 ** torch.arange(62, -1, -1, device=block_values.device)).to(torch.int64)
+        # 5. 降维投影与符号量化
+        # projected shape: [64]
+        projected = torch.matmul(flattened_v, self.rp_matrix)
+        bits = (projected > 0).to(torch.int8) # 0 或 1
+        # 6. 位运算打包为 Python 原生整型 (避免 PyTorch int64 溢出，且直接作为字典 Key 性能最佳)
+        # bits_list = bits.cpu().tolist()
+        # simhash_val = 0
+        # for bit in bits_list:
+        #     simhash_val = (simhash_val << 1) | bit
+        simhash_val = torch.sum(bits * self.powers_of_two).item()
+        return meso_score, simhash_val
 
     def get_batched_block_score_with_simhash(self, seq_keys, seq_values, evict_method, block_size):
         """
