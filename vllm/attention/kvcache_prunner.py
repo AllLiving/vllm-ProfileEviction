@@ -192,6 +192,40 @@ class KVCachePruner:
         final_score = ((envelope_volume ** gamma) * (hook_density ** (1.0 - gamma))).mean().item()
         return final_score
 
+    def _batched_profile_maxpool_v1(self, batched_keys, batched_values):
+        """
+        [Macro Stage 性能优化] 完全消除 for 循环的批量打分算子。
+        batched_keys / values shape: [num_blocks, block_size, num_heads, head_dim]
+        返回: [num_blocks] 形状的 Tensor (仍在 GPU 上)
+        """
+        # 1. 基础极性定义 (Batched)
+        # dim=-1 依然是 head_dim，求范数后 shape: [num_blocks, block_size, num_heads]
+        k_l2 = torch.linalg.vector_norm(batched_keys, ord=2, dim=-1)
+        k_l1 = torch.linalg.vector_norm(batched_keys, ord=1, dim=-1)
+        k_polarity = k_l2 / (k_l1 + 1e-8)
+        # 轨道一：Peak Feature Envelope (峰值特征包络)
+        v_abs = torch.abs(batched_values)  # [num_blocks, block_size, num_heads, head_dim]
+        # unsqueeze(-1) 让 polarity shape 变为 [..., num_heads, 1] 以便广播
+        weighted_v = v_abs * k_polarity.unsqueeze(-1)
+        # 沿着 Token 维度 (dim=1，即 block_size 维度) 求 Max
+        # gated_v_maxpool shape: [num_blocks, num_heads, head_dim]
+        gated_v_maxpool = torch.max(weighted_v, dim=1).values
+        # envelope_volume shape: [num_blocks, num_heads]
+        envelope_volume = torch.linalg.vector_norm(gated_v_maxpool, ord=1, dim=-1)
+        # 轨道二：Addressability Density (检索连通密度)
+        kappa = float(os.environ.get("PROFILE_KAPPA", "1.1"))
+        # 沿着 Token 维度 (dim=1) 求 Mean
+        # hook_density shape: [num_blocks, num_heads]
+        hook_density = (k_polarity ** kappa).mean(dim=1)
+        # 宏观几何融合 (Geometric Fusion)
+        gamma = float(os.environ.get("PROFILE_GAMMA", "0.1"))
+        # merged_scores shape: [num_blocks, num_heads]
+        merged_scores = (envelope_volume ** gamma) * (hook_density ** (1.0 - gamma))
+        # 沿着 Head 维度 (dim=1) 求 Mean
+        # 最终 final_batched_scores shape: [num_blocks]
+        final_batched_scores = merged_scores.mean(dim=1)
+        return final_batched_scores # 注意：这里不加 .item()，返回 GPU Tensor
+
     def _profile_maxpool_v2(self, block_keys, block_values):
         """版本 v2: 待调参或修改逻辑的预留位置"""
         pass
@@ -259,6 +293,51 @@ class KVCachePruner:
             else:
                 raise ValueError(f"Unknown PROFILE_VER: {profile_maxpool_version}")
             return scores
+
+    def get_batched_block_score_with_simhash(self, seq_keys, seq_values, evict_method, block_size):
+        """
+        [Macro Stage - 高性能优化版] 针对 Prefill 阶段，
+        一把梭计算所有 Block 的 SimHash，彻底消除 .item() 造成的 CPU-GPU Sync 阻塞。
+        """
+        num_tokens, num_heads, head_dim = seq_values.shape
+        num_blocks = num_tokens // block_size
+        if num_blocks == 0:
+            return [], []
+        # 1. 维度重组：[num_blocks, block_size, num_heads, head_dim]
+        # batched_keys = seq_keys.view(num_blocks, block_size, num_heads, head_dim)
+        # batched_values = seq_values.view(num_blocks, block_size, num_heads, head_dim)
+        valid_tokens = num_blocks * block_size
+        batched_keys = seq_keys[:valid_tokens].view(num_blocks, block_size, num_heads, head_dim)
+        batched_values = seq_values[:valid_tokens].view(num_blocks, block_size, num_heads, head_dim)
+        # 2. 批量获取 Meso Score
+        # (由于子打分逻辑包含复杂的切片/倒数运算，安全起见仍在此做 Python 循环提取分数)
+        # meso_scores = []
+        # for idx in range(num_blocks):
+        #     meso_scores.append(self.get_block_score(batched_keys[idx], batched_values[idx], evict_method))
+        if self.sub_evict_method == "profile_richness":
+            batched_meso_scores = self._batched_profile_maxpool_v1(batched_keys, batched_values)
+        else:
+            raise NotImplementedError("Please implement batched math for your specific evict_method")
+        # 3. [核心优化] 批量计算 V_profile -> [num_blocks, num_heads, head_dim]
+        v_profile = torch.max(torch.abs(batched_values), dim=1).values
+        # 4. 展平: [num_blocks, num_heads * head_dim]
+        flattened_v = v_profile.view(num_blocks, -1)
+        # 5. 初始化投影矩阵
+        if self.rp_matrix is None:
+            feature_dim = flattened_v.shape[1]
+            gen = torch.Generator(device=seq_values.device)
+            gen.manual_seed(42)
+            self.rp_matrix = torch.randn(feature_dim, 63, device=seq_values.device, dtype=seq_values.dtype, generator=gen)
+            self.powers_of_two = (2 ** torch.arange(62, -1, -1, device=seq_values.device)).to(torch.int64)
+        # 6. 极致并行的 GPU 矩阵乘法
+        # projected shape: [num_blocks, 63]
+        projected = torch.matmul(flattened_v, self.rp_matrix)
+        bits = (projected > 0).to(torch.int64)
+        # 7. GPU 并行二进制转 64-bit int: [num_blocks]
+        simhash_vals = torch.sum(bits * self.powers_of_two, dim=1)
+        # 8. 统一拉回 CPU，整个过程仅触发 1 次 CUDA Sync！
+        # return meso_scores, simhash_vals.cpu().tolist()
+        return batched_meso_scores.cpu().tolist(), simhash_vals.cpu().tolist()
 
     def prune_prompt(self, key_tensor, value_tensor):
         # remove tokens for a single request
