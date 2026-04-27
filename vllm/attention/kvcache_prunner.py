@@ -182,7 +182,8 @@ class KVCachePruner:
         weighted_v = v_abs * k_polarity.unsqueeze(-1)  # [S, H, D]
         gated_v_maxpool = torch.max(weighted_v, dim=0).values # [H, D]
         # L1 衡量包络的信息容量
-        envelope_volume = torch.linalg.vector_norm(gated_v_maxpool, ord=1, dim=-1) # [H]
+        head_dim = block_values.shape[-1]
+        envelope_volume = torch.linalg.vector_norm(gated_v_maxpool, ord=1, dim=-1) / head_dim # [H]
         # 轨道二：Addressability Density (检索连通密度)
         # 评估该 Block 作为一个整体的“防碎化”能力 (K极性的宏观平均)
         # [可选] 引入 Kappa 强化极性，根据 Lab 4 的结论，KAPPA=2.0 左右能放大差异
@@ -213,7 +214,8 @@ class KVCachePruner:
         # gated_v_maxpool shape: [num_blocks, num_heads, head_dim]
         gated_v_maxpool = torch.max(weighted_v, dim=1).values
         # envelope_volume shape: [num_blocks, num_heads]
-        envelope_volume = torch.linalg.vector_norm(gated_v_maxpool, ord=1, dim=-1)
+        head_dim = batched_values.shape[-1]
+        envelope_volume = torch.linalg.vector_norm(gated_v_maxpool, ord=1, dim=-1) / head_dim
         # 轨道二：Addressability Density (检索连通密度)
         kappa = float(os.environ.get("PROFILE_KAPPA", "1.1"))
         # 沿着 Token 维度 (dim=1) 求 Mean
