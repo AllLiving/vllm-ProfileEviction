@@ -1292,21 +1292,6 @@ class TorchCUDASDPABackendImpl(AttentionImpl[TorchCUDASDPAMetadata]):
                 )
                 
                 if not profile_run and self.paged_evict_config.evict_method in ["local", "global"]:
-                    # if self.enable_random_evict == False:
-                    #     l2_norms = []
-                    #     block_hashes = []
-                        # for idx in range(pruned_seq_lens[i] // self.cache_config.block_size):
-                        #     blk_start = out_start + idx * self.cache_config.block_size
-                        #     blk_end = blk_start + self.cache_config.block_size
-                        #     # Work directly with the final tensor slices
-                        #     blk_keys = pruned_keys[blk_start:blk_end, :, :]
-                        #     blk_values = pruned_values[blk_start:blk_end, :, :]
-                        #     block_score, b_hash = self.kv_cache_pruner.get_block_score_with_simhash(
-                        #         blk_keys, blk_values, self.paged_evict_config.evict_method)
-                        #     l2_norms.append(block_score)
-                        #     block_hashes.append(b_hash)
-                        # self.block_l2norm_mgr.update_block_l2norms(i, l2_norms)
-                        # self.block_l2norm_mgr.update_block_hashes(i, block_hashes)
                     if self.enable_random_evict == False:
                         # 1. 直接截取该请求的连续显存块
                         seq_pruned_keys = pruned_keys[out_start:out_start + pruned_seq_lens[i], :, :]
@@ -1599,6 +1584,24 @@ class TorchCUDASDPABackendImpl(AttentionImpl[TorchCUDASDPAMetadata]):
                 rmv_idx = blk_start
                 min_l2_norm = l2_norms[rmv_idx]
                 min_penalized_score = float('inf')
+                # [ProfileEvict Advanced Probe] 特征分布导出
+                import os
+                if os.environ.get("ENABLE_SIMHASH_DUMP", "0") == "1":
+                    dump_lines = []
+                    total_blocks = len(l2_norms)
+                    for idx in range(blk_start, blk_end):
+                        h = block_hashes[idx]
+                        freq = self.block_l2norm_mgr.global_hash_freq[h]
+                        norm = l2_norms[idx]
+                        # 计算相对深度: 0.0 代表最旧的块(开头)，1.0 代表最新的块(末尾)
+                        depth = idx / float(max(1, total_blocks - 1))
+
+                        # 记录：请求ID, 物理块索引, 相对深度, L2分数, Hash频次
+                        dump_lines.append(f"{target_req_id},{idx},{depth:.4f},{norm:.4f},{freq}")
+
+                    # 异步追加写入本地 CSV (注意：高并发下可能有极少量写入冲突，但在海量统计下可忽略)
+                    with open("simhash_feature_scatter.csv", "a") as f:
+                        f.write("\n".join(dump_lines) + "\n")
                 for idx in range(blk_start, blk_end):
                     h = block_hashes[idx]
                     freq = self.block_l2norm_mgr.global_hash_freq[h]
@@ -1614,6 +1617,8 @@ class TorchCUDASDPABackendImpl(AttentionImpl[TorchCUDASDPAMetadata]):
                 evicted_hash = block_hashes.pop(rmv_idx)
                 if self.block_l2norm_mgr.global_hash_freq[evicted_hash] > 0:
                     self.block_l2norm_mgr.global_hash_freq[evicted_hash] -= 1
+                    if self.block_l2norm_mgr.global_hash_freq[evicted_hash] == 0:
+                        del self.block_l2norm_mgr.global_hash_freq[evicted_hash]
 
                 # upt_block_tables.append(self.block_l2norm_mgr.get_updated_block_tables(id, rmv_idx, is_rmv_l2norm=True))
                 # print(f"layer_idx = {self.layer_idx} raw block tables type: {type(attn_metadata.decode_metadata.block_tables)}, shape={attn_metadata.decode_metadata.block_tables.shape} raw block tables: {attn_metadata.decode_metadata.block_tables[id]}, updated block tables: {upt_block_tables[id]}")
