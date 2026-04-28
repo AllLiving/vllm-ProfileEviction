@@ -1599,6 +1599,8 @@ class TorchCUDASDPABackendImpl(AttentionImpl[TorchCUDASDPAMetadata]):
                 evicted_hash = block_hashes.pop(rmv_idx)
                 if self.block_l2norm_mgr.global_hash_freq[evicted_hash] > 0:
                     self.block_l2norm_mgr.global_hash_freq[evicted_hash] -= 1
+                    if self.block_l2norm_mgr.global_hash_freq[evicted_hash] == 0:
+                        del self.block_l2norm_mgr.global_hash_freq[evicted_hash]
 
                 # upt_block_tables.append(self.block_l2norm_mgr.get_updated_block_tables(id, rmv_idx, is_rmv_l2norm=True))
                 # print(f"layer_idx = {self.layer_idx} raw block tables type: {type(attn_metadata.decode_metadata.block_tables)}, shape={attn_metadata.decode_metadata.block_tables.shape} raw block tables: {attn_metadata.decode_metadata.block_tables[id]}, updated block tables: {upt_block_tables[id]}")
