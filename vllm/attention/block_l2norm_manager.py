@@ -12,6 +12,7 @@ class BlockL2NormManager:
         self.reqid_mapping_seqs: Dict[str, List[int]] = None  # request_id -> seq_ids mapping
         self.flat_sequence_map = [] # used to fetch the request_id and seq_id based on the seq_idx quickly
         self.reqid_mapping_block_l2norms: Dict[str, Dict[int, List[float]]] = None  # request_id -> block_l2norm mapping
+
         # [ProfileEvict] Macro Stage: SimHash 状态挂载点
         # 记录全局每个 Hash 对应的物理 Block 数量，O(1) 查找
         self.global_hash_freq = collections.defaultdict(int)
@@ -75,7 +76,7 @@ class BlockL2NormManager:
             # 1. 引擎冷启动：首次分配
             self.reqid_mapping_blocktables = reqid_mapping_blocktables
             self.reqid_mapping_seqs = {}
-            self.reqid_mapping_block_l2norms = {} 
+            self.reqid_mapping_block_l2norms = {}
             self.reqid_mapping_block_hashes = {}
             for req_id, block_tables in reqid_mapping_blocktables.items():
                 self._init_new_req(req_id, block_tables)
@@ -115,7 +116,35 @@ class BlockL2NormManager:
             for req_id, block_tables in reqid_mapping_blocktables.items():
                 for seq_id in block_tables.keys():
                     self.flat_sequence_map.append((req_id, seq_id))
+        # [Probe Experiment] Information Entropy & Hash Collision Tracker
+        if self.step_counter % 50 == 0 and len(self.global_hash_freq) > 0:
+            import logging
+            logger = logging.getLogger(__name__)
 
+            unique_hashes = len(self.global_hash_freq)
+            total_active_blocks = sum(self.global_hash_freq.values())
+
+            # 计算碰撞率
+            collision_rate = 1.0 - (unique_hashes / float(max(1, total_active_blocks)))
+
+            # 计算哈希频次的信息熵 (Information Entropy)
+            import math
+            entropy = 0.0
+            max_freq = 0
+            for h, count in self.global_hash_freq.items():
+                if count > 0:
+                    prob = count / total_active_blocks
+                    entropy -= prob * math.log2(prob)
+                    if count > max_freq:
+                        max_freq = count
+            logger.info(f"\n[SimHash Probe] Step {self.step_counter} | "
+                        f"Active Blocks: {total_active_blocks} | "
+                        f"Unique Hashes: {unique_hashes} | "
+                        f"Collision Rate: {collision_rate:.2%} | "
+                        f"Max Freq: {max_freq} | "
+                        f"Entropy: {entropy:.4f}")
+
+    # 旧版 hash实现
     def update_reqs_defectHash(self, reqid_mapping_blocktables: Dict[str, Dict[int, List[int]]]):
         ### Based on the blocktables of each request to init and update the their block_l2 norms
         ### Goal: add the new request and delete old request
@@ -187,7 +216,6 @@ class BlockL2NormManager:
                                     del self.global_hash_freq[h]
                     # 删掉该请求的哈希隔离账本
                     del self.reqid_mapping_block_hashes[req_id]
-
                 if req_id in self.reqid_mapping_block_l2norms:
                     del self.reqid_mapping_block_l2norms[req_id]
                 if req_id in self.reqid_mapping_seqs:
