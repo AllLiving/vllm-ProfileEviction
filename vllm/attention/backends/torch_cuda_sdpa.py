@@ -1579,7 +1579,9 @@ class TorchCUDASDPABackendImpl(AttentionImpl[TorchCUDASDPAMetadata]):
                 # [ProfileEvict] 动态分数干预寻找 rmv_idx
                 import os
                 # 可调节的惩罚超参 lambda (建议初始设为 1.0 观察效果)
-                penalty_lambda = float(os.environ.get("SIMHASH_PENALTY_LAMBDA", "1.0"))
+                penalty_lambda = float(os.environ.get("SIMHASH_PENALTY_LAMBDA", "0.03"))
+                c_ratio = min(1.0, float(self.paged_evict_config.cache_budget) / max(1.0, float(seq_len)))
+                dynamic_lambda = penalty_lambda * (1.0 - c_ratio)
 
                 rmv_idx = blk_start
                 min_l2_norm = l2_norms[rmv_idx]
@@ -1588,7 +1590,9 @@ class TorchCUDASDPABackendImpl(AttentionImpl[TorchCUDASDPAMetadata]):
                     h = block_hashes[idx]
                     freq = self.block_l2norm_mgr.global_hash_freq[h]
                     # 核心公式
-                    penalized_score = l2_norms[idx] / (1.0 + penalty_lambda * max(0, freq - 1))
+                    # penalized_score = l2_norms[idx] / (1.0 + penalty_lambda * max(0, freq - 1))
+                    safe_freq = max(1, freq)
+                    penalized_score = l2_norms[idx] * (1.0 + dynamic_lambda / (safe_freq * safe_freq))
                     if penalized_score < min_penalized_score:
                         rmv_idx = idx
                         min_l2_norm = l2_norms[idx]
