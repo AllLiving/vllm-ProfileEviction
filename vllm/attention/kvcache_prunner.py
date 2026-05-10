@@ -135,6 +135,17 @@ def _jit_single_simhash(block_values: torch.Tensor, rp_matrix: torch.Tensor, pow
     # return int(torch.dot(bits, powers_of_two).item())
     return int((bits * powers_of_two).sum().item())
 
+# =====================================================================
+# [性能优化]: 为 Paged-Ratio 提供同等规格的 Batched JIT 算子，确保对比公平
+# =====================================================================
+@torch.jit.script
+def _jit_batched_paged_ratio(batched_keys: torch.Tensor, batched_values: torch.Tensor) -> torch.Tensor:
+    # batched_keys/values shape: [num_reqs, block_size, num_heads, head_dim]
+    # dim=-1 求特征 L2，dim=1 求 Token 平均，dim=-1 求 Head 累加
+    v_norm = torch.norm(batched_values, p=2, dim=-1).mean(dim=1).sum(dim=-1)
+    k_norm = torch.norm(batched_keys, p=2, dim=-1).mean(dim=1).sum(dim=-1)
+    return v_norm / (k_norm + 1e-8)
+
 class KVCachePruner:
     def __init__(self, cache_prune_type, evict_method, block_size, cache_budget, initial_blocks, evict_metric="value_l2"):
         self.cache_prune_type = cache_prune_type
@@ -413,27 +424,30 @@ class KVCachePruner:
 
     def get_batched_score_and_hash_for_decode(self, batched_keys, batched_values, evict_method):
         """
-        [Decode Stage - 高性能优化版] 针对 Decode 阶段，
-        将多条 Request 拼接为 Batched Tensor 一次性打分和计算 Hash。
-        batched_keys: [num_reqs, block_size, num_heads, head_dim]
+        [Decode Stage - 公平竞技场]
         """
+        # 1. 公平的批量打分分发
         if self.sub_evict_method == "profile_richness":
             batched_meso_scores = self._batched_profile_maxpool_v1(batched_keys, batched_values)
+        elif self.sub_evict_method == "paged_ratio":
+            # 引入同等规格的 Paged-Ratio 批量算子
+            batched_meso_scores = _jit_batched_paged_ratio(batched_keys, batched_values)
         else:
             raise NotImplementedError("Batched decode math not implemented for this evict_method")
+        # 2. 严格的 SimHash 计算隔离
+        if self.sub_evict_method == "profile_richness":
+            if self.rp_matrix is None:
+                feature_dim = batched_keys.shape[2] * batched_keys.shape[3]
+                gen = torch.Generator(device=batched_keys.device)
+                gen.manual_seed(42)
+                self.rp_matrix = torch.randn(feature_dim, 63, device=batched_keys.device, dtype=batched_keys.dtype, generator=gen)
+                self.powers_of_two = (2 ** torch.arange(62, -1, -1, device=batched_keys.device)).to(torch.int64)
 
-        if self.rp_matrix is None:
-            feature_dim = batched_keys.shape[2] * batched_keys.shape[3]
-            gen = torch.Generator(device=batched_keys.device)
-            gen.manual_seed(42)
-            self.rp_matrix = torch.randn(feature_dim, 63, device=batched_keys.device, dtype=batched_keys.dtype, generator=gen)
-            self.powers_of_two = (2 ** torch.arange(62, -1, -1, device=batched_keys.device)).to(torch.int64)
-
-        # 复用上个版本注入的 _jit_batched_simhash 静态编译算子
-        simhash_vals = _jit_batched_simhash(batched_values, self.rp_matrix, self.powers_of_two)
-
-        # 统一拉回 CPU，整个 Decode Step 仅触发 1 次 CUDA Sync！
-        return batched_meso_scores.tolist(), simhash_vals.tolist()
+            simhash_vals = _jit_batched_simhash(batched_values, self.rp_matrix, self.powers_of_two)
+            return batched_meso_scores.tolist(), simhash_vals.tolist()
+        else:
+            # Paged-Ratio 享有特权：直接返回空 Hash 占位符，免受矩阵乘法的算力“税”
+            return batched_meso_scores.tolist(), [-1] * batched_keys.shape[0]
 
     def prune_prompt(self, key_tensor, value_tensor):
         # remove tokens for a single request

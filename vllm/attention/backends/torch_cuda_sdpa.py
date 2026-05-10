@@ -1557,7 +1557,7 @@ class TorchCUDASDPABackendImpl(AttentionImpl[TorchCUDASDPAMetadata]):
             batched_kvs = kv_cache[:, src_indices, :]
             batched_keys = batched_kvs[0].view(-1, self.cache_config.block_size, self.num_kv_heads, self.head_size)
             batched_values = batched_kvs[1].view(-1, self.cache_config.block_size, self.num_kv_heads, self.head_size)
-            if is_profile_metric:
+            if is_profile_metric or self.paged_evict_config.evict_metric == "paged_ratio":
                 scores_list, hashes_list = self.kv_cache_pruner.get_batched_score_and_hash_for_decode(
                     batched_keys, batched_values, self.paged_evict_config.evict_method)
             else:
