@@ -1293,17 +1293,26 @@ class TorchCUDASDPABackendImpl(AttentionImpl[TorchCUDASDPAMetadata]):
                 
                 if not profile_run and self.paged_evict_config.evict_method in ["local", "global"]:
                     if self.enable_random_evict == False:
-                        # 1. 直接截取该请求的连续显存块
-                        seq_pruned_keys = pruned_keys[out_start:out_start + pruned_seq_lens[i], :, :]
-                        seq_pruned_values = pruned_values[out_start:out_start + pruned_seq_lens[i], :, :]
-                        # 2. 一把梭调用 Batched 算子，消除 99% 的 Sync 阻塞
-                        l2_norms, block_hashes = self.kv_cache_pruner.get_batched_block_score_with_simhash(
-                            seq_pruned_keys, seq_pruned_values, self.paged_evict_config.evict_method, self.cache_config.block_size
-                        )
-                        # 3. 登记入册
-                        self.block_l2norm_mgr.update_block_l2norms(i, l2_norms)
-                        self.block_l2norm_mgr.update_block_hashes(i, block_hashes)
-            
+                        if self.paged_evict_config.evict_metric == "profile_richness":
+                            # 1. 直接截取该请求的连续显存块
+                            seq_pruned_keys = pruned_keys[out_start:out_start + pruned_seq_lens[i], :, :]
+                            seq_pruned_values = pruned_values[out_start:out_start + pruned_seq_lens[i], :, :]
+                            # 2. 一把梭调用 Batched 算子，消除 99% 的 Sync 阻塞
+                            l2_norms, block_hashes = self.kv_cache_pruner.get_batched_block_score_with_simhash(
+                                seq_pruned_keys, seq_pruned_values, self.paged_evict_config.evict_method, self.cache_config.block_size
+                            )
+                            # 3. 登记入册
+                            self.block_l2norm_mgr.update_block_l2norms(i, l2_norms)
+                            self.block_l2norm_mgr.update_block_hashes(i, block_hashes)
+                        else:
+                            l2_norms = []
+                            for idx in range(pruned_seq_lens[i] // self.cache_config.block_size):
+                                blk_start = out_start + idx * self.cache_config.block_size
+                                blk_end = blk_start + self.cache_config.block_size
+                                # Work directly with the final tensor slices
+                                blk_keys = pruned_keys[blk_start:blk_end, :, :]
+                                blk_values = pruned_values[blk_start:blk_end, :, :]
+                                l2_norms.append(self.kv_cache_pruner.get_block_score(blk_keys, blk_values, self.paged_evict_config.evict_method))
             s_idx = e_idx
         
         # Wait for all streams to complete
