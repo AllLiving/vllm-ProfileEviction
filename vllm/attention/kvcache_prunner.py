@@ -411,6 +411,30 @@ class KVCachePruner:
         # 统一拉回 CPU，整个处理过程由 N 次下降为仅触发 1 次 CUDA Sync！
         return batched_meso_scores.tolist(), simhash_vals.tolist()
 
+    def get_batched_score_and_hash_for_decode(self, batched_keys, batched_values, evict_method):
+        """
+        [Decode Stage - 高性能优化版] 针对 Decode 阶段，
+        将多条 Request 拼接为 Batched Tensor 一次性打分和计算 Hash。
+        batched_keys: [num_reqs, block_size, num_heads, head_dim]
+        """
+        if self.sub_evict_method == "profile_richness":
+            batched_meso_scores = self._batched_profile_maxpool_v1(batched_keys, batched_values)
+        else:
+            raise NotImplementedError("Batched decode math not implemented for this evict_method")
+
+        if self.rp_matrix is None:
+            feature_dim = batched_keys.shape[2] * batched_keys.shape[3]
+            gen = torch.Generator(device=batched_keys.device)
+            gen.manual_seed(42)
+            self.rp_matrix = torch.randn(feature_dim, 63, device=batched_keys.device, dtype=batched_keys.dtype, generator=gen)
+            self.powers_of_two = (2 ** torch.arange(62, -1, -1, device=batched_keys.device)).to(torch.int64)
+
+        # 复用上个版本注入的 _jit_batched_simhash 静态编译算子
+        simhash_vals = _jit_batched_simhash(batched_values, self.rp_matrix, self.powers_of_two)
+
+        # 统一拉回 CPU，整个 Decode Step 仅触发 1 次 CUDA Sync！
+        return batched_meso_scores.tolist(), simhash_vals.tolist()
+
     def prune_prompt(self, key_tensor, value_tensor):
         # remove tokens for a single request
         # start = time.perf_counter()

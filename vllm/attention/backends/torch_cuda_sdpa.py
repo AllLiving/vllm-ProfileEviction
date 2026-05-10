@@ -1501,9 +1501,135 @@ class TorchCUDASDPABackendImpl(AttentionImpl[TorchCUDASDPAMetadata]):
         
         # return pruned_keys, pruned_values, pruned_kvs_slot_mapping, is_pruned_decode
         return num_update_tokens, pruned_kvs_slot_mapping, is_pruned_decode 
-    
-    
+
     def _prune_decode_reqs_topk(self, kv_cache: torch.Tensor, attn_metadata: TorchCUDASDPAMetadata):
+        kv_cache_device, kv_cache_dtype = kv_cache.device, kv_cache.dtype
+        updated_block_tables, seqid_to_rmv_block_idx = None, {}
+
+        is_pruned_decode = False
+        idx_to_rmv_block_idx = {}
+
+        import os
+        penalty_lambda = float(os.environ.get("SIMHASH_PENALTY_LAMBDA", "1.0"))
+        is_profile_metric = (self.paged_evict_config.evict_metric == "profile_richness")
+
+        # =====================================================================
+        # [PASS 1: 批量收集] 找到所有需要驱逐的 Request，提取最新生成的物理块索引
+        # =====================================================================
+        need_evict_ids = []
+        target_req_seq_pairs = []
+        src_indices = []
+
+        for id, seq_len in enumerate(attn_metadata.seq_lens):
+            if seq_len <= self.paged_evict_config.cache_budget:
+                continue
+            if seq_len % self.cache_config.block_size != 0:
+                continue
+
+            is_pruned_decode = True
+            target_req_id, target_seq_id = self.block_l2norm_mgr.get_reqid_and_seqid(id)
+            if self.enable_random_evict:
+                # Random 驱逐直接原地解决，不参与批量打分
+                block_ids = attn_metadata.reqid_mapping_blocktables[target_req_id][int(target_seq_id)]
+                if self.paged_evict_config.evict_method == "local":
+                    blk_start = self.paged_evict_config.initial_blocks
+                    blk_end = blk_start + self.paged_evict_config.topk_blocks
+                else:
+                    blk_start = self.paged_evict_config.initial_blocks
+                    blk_end = len(block_ids) - 1
+
+                rmv_idx = random.randint(blk_start, blk_end - 1)
+                seqid_to_rmv_block_idx[id] = (target_req_id, rmv_idx)
+                idx_to_rmv_block_idx[id] = rmv_idx
+            else:
+                need_evict_ids.append(id)
+                target_req_seq_pairs.append((target_req_id, target_seq_id))
+                src_idx = attn_metadata.reqid_mapping_blocktables[target_req_id][int(target_seq_id)][-1]
+                src_indices.append(src_idx)
+
+        # =====================================================================
+        # [PASS 2: 极致并发打分] 组合大张量，一把梭调用 GPU 计算并拉回 CPU
+        # =====================================================================
+        scores_list = []
+        hashes_list = []
+        if len(need_evict_ids) > 0:
+            # 瞬间提取所有相关请求的最新 KV，组成 [num_reqs, block_size, num_heads, head_dim]
+            batched_kvs = kv_cache[:, src_indices, :]
+            batched_keys = batched_kvs[0].view(-1, self.cache_config.block_size, self.num_kv_heads, self.head_size)
+            batched_values = batched_kvs[1].view(-1, self.cache_config.block_size, self.num_kv_heads, self.head_size)
+            if is_profile_metric:
+                scores_list, hashes_list = self.kv_cache_pruner.get_batched_score_and_hash_for_decode(
+                    batched_keys, batched_values, self.paged_evict_config.evict_method)
+            else:
+                # 非 Profile 策略的降级保护（以防兼容性问题，因为它们不消耗 SimHash 的矩阵乘法）
+                for src_idx in src_indices:
+                    tmp_kvs = kv_cache[:, src_idx, :]
+                    tmp_key = tmp_kvs[0].view(-1, self.num_kv_heads, self.head_size)
+                    tmp_value = tmp_kvs[1].view(-1, self.num_kv_heads, self.head_size)
+                    l2_norm = self.kv_cache_pruner.get_block_score(tmp_key, tmp_value, self.paged_evict_config.evict_method)
+                    scores_list.append(l2_norm)
+                    hashes_list.append(-1)
+
+        # =====================================================================
+        # [PASS 3: Python 字典更新与驱逐选拔] 纯内存操作，极速遍历
+        # =====================================================================
+        for i, id in enumerate(need_evict_ids):
+            target_req_id, target_seq_id = target_req_seq_pairs[i]
+            l2_norm = scores_list[i]
+            b_hash = hashes_list[i]
+            block_hashes = self.block_l2norm_mgr.reqid_mapping_block_hashes[target_req_id][int(target_seq_id)]
+            block_hashes.append(b_hash)
+            if is_profile_metric:
+                self.block_l2norm_mgr.global_hash_freq[b_hash] = self.block_l2norm_mgr.global_hash_freq.get(b_hash, 0) + 1
+
+            l2_norms = self.block_l2norm_mgr.update_last_block_l2norm(id, l2_norm)
+
+            if self.paged_evict_config.evict_method == "local":
+                blk_start = self.paged_evict_config.initial_blocks
+                blk_end = blk_start + self.paged_evict_config.topk_blocks
+            else:
+                blk_start = self.paged_evict_config.initial_blocks
+                blk_end = len(l2_norms) - 1
+
+            rmv_idx = blk_start
+            min_penalized_score = float('inf')
+
+            # 极速通道分离
+            if not is_profile_metric or penalty_lambda == 0.0:
+                for idx in range(blk_start, blk_end):
+                    if l2_norms[idx] < min_penalized_score:
+                        rmv_idx = idx
+                        min_penalized_score = l2_norms[idx]
+            else:
+                for idx in range(blk_start, blk_end):
+                    h = block_hashes[idx]
+                    freq = self.block_l2norm_mgr.global_hash_freq.get(h, 0) if h != -1 else 0
+                    penalized_score = l2_norms[idx] / (1.0 + penalty_lambda * max(0, freq - 1))
+                    if penalized_score < min_penalized_score:
+                        rmv_idx = idx
+                        min_penalized_score = penalized_score
+            seqid_to_rmv_block_idx[id] = (target_req_id, rmv_idx)
+            idx_to_rmv_block_idx[id] = rmv_idx
+            l2_norms.pop(rmv_idx)
+
+            # 驱逐后安全扣除 Hash
+            evicted_hash = block_hashes.pop(rmv_idx)
+            if evicted_hash != -1:
+                freq = self.block_l2norm_mgr.global_hash_freq.get(evicted_hash, 0)
+                if freq > 1:
+                    self.block_l2norm_mgr.global_hash_freq[evicted_hash] = freq - 1
+                elif freq == 1:
+                    del self.block_l2norm_mgr.global_hash_freq[evicted_hash]
+
+        # ---------------------------------------------------------------------
+        # 物理表映射更新
+        # ---------------------------------------------------------------------
+        if is_pruned_decode:
+            updated_block_tables = self._create_updated_block_tables(
+                attn_metadata.decode_metadata.block_tables, idx_to_rmv_block_idx)
+        return updated_block_tables, seqid_to_rmv_block_idx, is_pruned_decode
+
+    def _prune_decode_reqs_topk_muchLatency(self, kv_cache: torch.Tensor, attn_metadata: TorchCUDASDPAMetadata):
         # start_1 = time.perf_counter()
         kv_cache_device, kv_cache_dtype = kv_cache.device, kv_cache.dtype
         pin_memory = kv_cache_device.type == 'cpu'
