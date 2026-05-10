@@ -15,7 +15,7 @@ class BlockL2NormManager:
 
         # [ProfileEvict] Macro Stage: SimHash 状态挂载点
         # 记录全局每个 Hash 对应的物理 Block 数量，O(1) 查找
-        self.global_hash_freq = collections.defaultdict(int)
+        self.global_hash_freq: Dict[int, int] = {}
         # 记录每个 Request 对应的 Block Hash 账本，与 block_l2norms 结构严格对齐
         self.reqid_mapping_block_hashes: Dict[str, Dict[int, List[int]]] = None
         # [ProfileEvict GC] TTL 垃圾回收状态
@@ -30,10 +30,13 @@ class BlockL2NormManager:
         if req_id in self.reqid_mapping_block_hashes:
             for seq_id, block_hashes in self.reqid_mapping_block_hashes[req_id].items():
                 for h in block_hashes:
-                    if h != -1 and self.global_hash_freq[h] > 0:
-                        self.global_hash_freq[h] -= 1
-                        if self.global_hash_freq[h] == 0:
-                            del self.global_hash_freq[h] # 字典瘦身
+                    if h != -1:
+                        # [核心修复 2]: 使用 .get() 绝对安全，不会污染字典
+                        freq = self.global_hash_freq.get(h, 0)
+                        if freq > 1:
+                            self.global_hash_freq[h] = freq - 1
+                        elif freq == 1:
+                            del self.global_hash_freq[h]
 
     def _increment_req_hashes(self, req_id: str):
         """[GC 钩子] 请求从 Swap Out 唤醒时，将其原有 Hash 重新注入全局池"""
@@ -41,7 +44,7 @@ class BlockL2NormManager:
             for seq_id, block_hashes in self.reqid_mapping_block_hashes[req_id].items():
                 for h in block_hashes:
                     if h != -1:
-                        self.global_hash_freq[h] += 1
+                        self.global_hash_freq[h] = self.global_hash_freq.get(h, 0) + 1
 
     def _hard_delete_req(self, req_id: str):
         """[GC 钩子] 超出 TTL，执行真正的本地内存清理"""
@@ -209,12 +212,13 @@ class BlockL2NormManager:
         assert target_req_id is not None and target_seq_id is not None, "Invalid seq_idx for block l2 norm update"
         ## update the block l2 norms for the target request and seq
         self.reqid_mapping_block_l2norms[target_req_id][target_seq_id] = l2_norms
+
     def update_block_hashes(self, seq_idx: int, hashes: List[int]):
-        # [ProfileEvict] 注册钩子：Prefill 阶段全量写入 Hash 账本，并更新全局频次
         target_req_id, target_seq_id = self.get_reqid_and_seqid(seq_idx)
         self.reqid_mapping_block_hashes[target_req_id][target_seq_id] = hashes
         for h in hashes:
-            self.global_hash_freq[h] += 1
+            if h != -1:
+                self.global_hash_freq[h] = self.global_hash_freq.get(h, 0) + 1
 
     def update_last_block_l2norm(self, seq_idx: int, l2_norm: float):
         target_req_id, target_seq_id = self.get_reqid_and_seqid(seq_idx)
