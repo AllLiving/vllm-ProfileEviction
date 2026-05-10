@@ -5,6 +5,47 @@ import time
 import os
 
 # =====================================================================
+# [性能优化]: 静态编译 Token 级双轨制打分函数
+# =====================================================================
+@torch.jit.script
+def _jit_profile_sparsity_v1(keys: torch.Tensor, values: torch.Tensor, k_hoyer: torch.Tensor, gamma: float, kappa: float) -> torch.Tensor:
+    # --- V 部分 ---
+    # 极致优化：L1 范数等价于 abs().sum()，并在 head 维度一并 sum
+    # 原逻辑: norm(ord=1, dim=-1).sum(dim=1) -> 优化为: abs().sum(dim=[-1, 1])
+    v_score_raw = values.abs().sum(dim=[-1, 1]) # [S]
+    v_score = v_score_raw / (v_score_raw.mean() + 1e-8)
+
+    # --- K 部分 ---
+    # L2 范数必须用底层 norm
+    k_l2 = torch.norm(keys, p=2, dim=-1) # [S, H]
+    k_l2_normed = k_l2 / (k_l2.mean(dim=0, keepdim=True) + 1e-8)
+    k_kinetic = (1.0 / (k_l2_normed + 1e-2)) * k_hoyer # [S, H]
+    k_score_raw = k_kinetic.sum(dim=1) # [S]
+    k_score = k_score_raw / (k_score_raw.mean() + 1e-8)
+
+    # 融合：公平对数凸组合
+    # 返回形状需增加一维以匹配原逻辑
+    return ((v_score ** gamma) * (k_score ** kappa)).unsqueeze(-1)
+
+@torch.jit.script
+def _jit_profile_sparsity_v2(keys: torch.Tensor, values: torch.Tensor, gamma: float, kappa: float) -> torch.Tensor:
+    # --- V 部分 ---
+    # 极致优化：L1 范数等价于 abs().sum()，连带 head 维度一并求和
+    v_score_raw = values.abs().sum(dim=[-1, 1]) # [S]
+    v_score = v_score_raw / (v_score_raw.mean() + 1e-8)
+
+    # --- K 部分 ---
+    # 极致优化：L1 范数等价于 abs().sum()。
+    # 这里 k_l1 是 [S, H]，后续要做除法，所以只在 -1 维度求和
+    k_l1 = keys.abs().sum(dim=-1) # [S, H]
+    k_kinetic = 1.0 / (k_l1 + 1e-8) # [S, H]
+    k_score_raw = k_kinetic.sum(dim=1) # [S]
+    k_score = k_score_raw / (k_score_raw.mean() + 1e-8)
+
+    # 几何融合
+    return ((v_score ** gamma) * (k_score ** kappa)).unsqueeze(-1)
+
+# =====================================================================
 # [性能优化]: 静态编译双轨制打分函数，融合碎算子，消除 Python 调度开销
 # =====================================================================
 @torch.jit.script
@@ -103,46 +144,36 @@ class KVCachePruner:
         return sparsity
 
     def _profile_sparsity_v1(self, keys, values):
-        k_l1_norm = torch.norm(keys, p=1, dim=-1)
-        k_l2_norm = torch.norm(keys, p=2, dim=-1)
-        v_l1_norm = torch.norm(values, p=1, dim=-1)
-        v_l2_norm = torch.norm(values, p=2, dim=-1)
-        devoto_score = 1.0 / (k_l2_norm + 1e-8)
+        """
+        [方案：无魔数显式动能门控标准版 (Cobb-Douglas 归一化融合)]
+        已通过 @torch.jit.script 静态编译，利用 abs().sum() 数学等价替换极速计算。
+        """
         seq_len = keys.shape[0]
-        if seq_len < self.cache_budget:
-            scores = devoto_score
-        else:
-            gamma = 0.4
-            alpha = 0.3
-            rescue_ratio = 0.04
-            k_sparsity = k_l2_norm / (k_l1_norm + 1e-8)
-            v_sparsity = v_l2_norm / (v_l1_norm + 1e-8)
-            hoper = alpha * k_sparsity + (1 - alpha) * v_sparsity
-            hoper = torch.maximum(alpha * k_sparsity, v_sparsity)
-            # hoper = (k_sparsity ** gamma) * (v_sparsity ** (1 - gamma))
-            # 只有能量大于中位数的 Token 才有资格申请免死金牌
-            quantile_ratio = 0.4
-            devoto_mean = devoto_score.mean(dim=0, keepdim=True) * 0.85
-            # k_l2_median = torch.median(k_l2_norm, dim=0, keepdim=True).values
-            k_l2_median = torch.kthvalue(k_l2_norm, max(1, int(seq_len * quantile_ratio)), dim=0, keepdim=True).values
-            valid_mask = devoto_score < devoto_mean
-            valid_mask = k_l2_norm < k_l2_median
-            indicator = hoper * valid_mask.float()
-            # 级联设计：提取极性最强的前 15% Token 进行全局豁免
-            rescue_budget_tokens = int(self.cache_budget * rescue_ratio)
-            sparsity_kth = max(1, seq_len - rescue_budget_tokens)
-            if sparsity_kth < seq_len:
-                threshold = torch.kthvalue(indicator, sparsity_kth, dim=0, keepdim=True).values
-                is_highly_sparse = (indicator >= threshold) & (indicator > 0)
-                max_devoto = devoto_score.max(dim=0, keepdim=True).values
-                scores = devoto_score + (is_highly_sparse.float() * max_devoto * 2.0)
-            else:
-                scores = devoto_score
-        return scores
+        budget = self.cache_budget
+        c_ratio = min(1.0, float(budget) / max(seq_len, 1))
+        # 将环境变量读取移至外部或使用类缓存 (建议后续将其移至 __init__ 中)
+        beta = float(os.environ.get("PROFILE_KAPPA_TOKEN", "1.0"))
+        gamma = 1.0 - c_ratio
+        kappa = c_ratio * beta
+        # Hoyer 稀疏度由于内部涉及较多独立逻辑，保持原函数调用
+        k_hoyer = self.compute_hoyer_sparsity(keys) # [S, H]
+        # 移交 JIT 引擎执行
+        return _jit_profile_sparsity_v1(keys, values, k_hoyer, gamma, kappa)
 
     def _profile_sparsity_v2(self, keys, values):
-        """版本 v2: 待调参或修改逻辑的预留位置"""
-        pass
+        """
+        [方案：纯净 L1 正交同构]
+        已通过 @torch.jit.script 静态编译，纯净无依赖极速版。
+        """
+        seq_len = keys.shape[0]
+        budget = self.cache_budget
+        c_ratio = min(1.0, float(budget) / max(seq_len, 1))
+        base_param = float(os.environ.get("PROFILE_KAPPA_TOKEN", "1.0"))
+        # 按照您的原始代码中最终生效的赋值逻辑
+        gamma = base_param * (1.0 - c_ratio)
+        kappa = base_param * c_ratio
+        # 移交 JIT 引擎执行
+        return _jit_profile_sparsity_v2(keys, values, gamma, kappa)
 
     def _profile_sparsity_v3(self, keys, values):
         """版本 v3: 待调参或修改逻辑的预留位置"""
