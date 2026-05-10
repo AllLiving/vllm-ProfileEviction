@@ -209,6 +209,12 @@ class BlockL2NormManager:
         assert target_req_id is not None and target_seq_id is not None, "Invalid seq_idx for block l2 norm update"
         ## update the block l2 norms for the target request and seq
         self.reqid_mapping_block_l2norms[target_req_id][target_seq_id] = l2_norms
+    def update_block_hashes(self, seq_idx: int, hashes: List[int]):
+        # [ProfileEvict] 注册钩子：Prefill 阶段全量写入 Hash 账本，并更新全局频次
+        target_req_id, target_seq_id = self.get_reqid_and_seqid(seq_idx)
+        self.reqid_mapping_block_hashes[target_req_id][target_seq_id] = hashes
+        for h in hashes:
+            self.global_hash_freq[h] += 1
 
     def update_last_block_l2norm(self, seq_idx: int, l2_norm: float):
         target_req_id, target_seq_id = self.get_reqid_and_seqid(seq_idx)
