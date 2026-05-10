@@ -4,6 +4,52 @@ import math
 import time
 import os
 
+# =====================================================================
+# [性能优化]: 静态编译双轨制打分函数，融合碎算子，消除 Python 调度开销
+# =====================================================================
+@torch.jit.script
+def _jit_dual_track_score(block_keys: torch.Tensor, block_values: torch.Tensor, kappa: float, gamma: float) -> float:
+    # 1. 基础极性定义
+    # 【回退优化】坚决使用 torch.norm，利用底层 C++ ATen 级高度优化的融合算子
+    k_l2 = torch.norm(block_keys, p=2, dim=-1)
+    k_l1 = torch.norm(block_keys, p=1, dim=-1)
+    k_polarity = k_l2 / (k_l1 + 1e-8)  # [S, H]
+
+    # 轨道一：Peak Feature Envelope
+    # 【图优化友好】依赖 JIT 编译器的自动算子融合 (Auto-Fusion)，不要用 .mul_ 打断计算图
+    weighted_v = torch.abs(block_values) * k_polarity.unsqueeze(-1)  # [S, H, D]
+    gated_v_maxpool = torch.max(weighted_v, dim=0).values # [H, D]
+
+    # 【保留胜利】因为 gated_v_maxpool 绝对非负，使用原生的 .sum() 替代 .norm(p=1) 达到极速
+    envelope_volume = gated_v_maxpool.sum(dim=-1) # [H]
+
+    # 轨道二：Addressability Density
+    hook_density = (k_polarity ** kappa).mean(dim=0) # [H]
+
+    # 宏观几何融合
+    final_score = ((envelope_volume ** gamma) * (hook_density ** (1.0 - gamma))).mean()
+    return final_score.item()
+
+@torch.jit.script
+def _jit_dual_track_score_proto(block_keys: torch.Tensor, block_values: torch.Tensor, kappa: float, gamma: float) -> float:
+    # 1. 基础极性定义 (恢复使用轻量级的 torch.norm)
+    k_l2 = torch.norm(block_keys, p=2, dim=-1)
+    k_l1 = torch.norm(block_keys, p=1, dim=-1)
+    k_polarity = k_l2 / (k_l1 + 1e-8)  # [S, H]
+
+    # 轨道一：Peak Feature Envelope
+    v_abs = torch.abs(block_values)    # [S, H, D]
+    weighted_v = v_abs * k_polarity.unsqueeze(-1)  # [S, H, D]
+    gated_v_maxpool = torch.max(weighted_v, dim=0).values # [H, D]
+    envelope_volume = torch.norm(gated_v_maxpool, p=1, dim=-1) # [H]
+
+    # 轨道二：Addressability Density
+    hook_density = (k_polarity ** kappa).mean(dim=0) # [H]
+
+    # 宏观几何融合
+    final_score = ((envelope_volume ** gamma) * (hook_density ** (1.0 - gamma))).mean()
+    return final_score.item()
+
 class KVCachePruner:
     def __init__(self, cache_prune_type, evict_method, block_size, cache_budget, initial_blocks, evict_metric="value_l2"):
         self.cache_prune_type = cache_prune_type
@@ -16,6 +62,9 @@ class KVCachePruner:
         self.initial_blocks = initial_blocks   # Number of compressed blocks to keep unpruned
         # print(f"\n[DEBUG] PagedEviction initialized with Metric: {self.sub_evict_method}\n")
         assert self.cache_budget >= 3 * self.orig_block_size, "Cache budget must be at least 3 times the original block size"
+        # [性能优化]: 在初始化阶段缓存环境变量，避免热点循环中的系统调用
+        self.profile_kappa = float(os.environ.get("PROFILE_KAPPA", "1.1"))
+        self.profile_gamma = float(os.environ.get("PROFILE_GAMMA", "0.1"))
         
     def key_l2(self, key_block):
         return torch.norm(key_block, p=2, dim = -1)  # mean over the heads
@@ -137,7 +186,9 @@ class KVCachePruner:
         """
         [提纯版双轨制：峰值特征包络 × 检索连通密度]
         逻辑极其清晰，专为学术论文公式对应而设计。完美复现 Lab 3.2 优势，消灭 broadcasting 隐患。
+        已通过 @torch.jit.script 静态编译优化吞吐性能。
         """
+        return _jit_dual_track_score(block_keys, block_values, self.profile_kappa, self.profile_gamma)
         # 1. 基础极性定义 (Token级)
         k_l2 = torch.linalg.vector_norm(block_keys, ord=2, dim=-1)
         k_l1 = torch.linalg.vector_norm(block_keys, ord=1, dim=-1)
